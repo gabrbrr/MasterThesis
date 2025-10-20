@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-propositions = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l","m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]
+propositions = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
 
 LTL_BASE_VOCAB = {
     "and": 0, "or": 1, "not": 2, "next": 3, "until": 4,
