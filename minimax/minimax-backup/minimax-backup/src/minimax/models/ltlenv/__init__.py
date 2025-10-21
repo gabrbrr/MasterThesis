@@ -1,1 +1,0 @@
-from .letterworld_model import ACModel
