@@ -86,12 +86,11 @@ def compute_gae(
     )
     return advantages, advantages + values
 
-def sample_trajectories_rnn(
+def sample_trajectories(
     rng: chex.PRNGKey,
     env: UnderspecifiedEnv,
     env_params: EnvParams,
     train_state: TrainState,
-    init_hstate: chex.ArrayTree,
     init_obs: Observation,
     init_env_state: EnvState,
     num_envs: int,
@@ -105,61 +104,48 @@ def sample_trajectories_rnn(
         env (UnderspecifiedEnv): 
         env_params (EnvParams): 
         train_state (TrainState): Singleton
-        init_hstate (chex.ArrayTree): This is the init RNN hidden state, has to have shape (NUM_ENVS, ...)
         init_obs (Observation): The initial observation, shape (NUM_ENVS, ...)
         init_env_state (EnvState): The initial env state (NUM_ENVS, ...)
         num_envs (int): The number of envs that are vmapped over.
         max_episode_length (int): The maximum episode length, i.e., the number of steps to do the rollouts for.
 
     Returns:
-        Tuple[Tuple[chex.PRNGKey, TrainState, chex.ArrayTree, Observation, EnvState, chex.Array], Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict]]: (rng, train_state, hstate, last_obs, last_env_state, last_value), traj, where traj is (obs, action, reward, done, log_prob, value, info). The first element in the tuple consists of arrays that have shapes (NUM_ENVS, ...) (except `rng` and and `train_state` which are singleton). The second element in the tuple is of shape (NUM_STEPS, NUM_ENVS, ...), and it contains the trajectory.
+        Tuple[Tuple[chex.PRNGKey, TrainState, Observation, EnvState, chex.Array], Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict]]: (rng, train_state, hstate, last_obs, last_env_state, last_value), traj, where traj is (obs, action, reward, done, log_prob, value, info). The first element in the tuple consists of arrays that have shapes (NUM_ENVS, ...) (except `rng` and and `train_state` which are singleton). The second element in the tuple is of shape (NUM_STEPS, NUM_ENVS, ...), and it contains the trajectory.
     """
     def sample_step(carry, _):
-        rng, train_state, hstate, obs, env_state, last_done = carry
+        rng, train_state, obs, env_state = carry
         rng, rng_action, rng_step = jax.random.split(rng, 3)
-
-        x = jax.tree_map(lambda x: x[None, ...], (obs, last_done))
-        hstate, pi, value = train_state.apply_fn(train_state.params, x, hstate)
+        pi, value = train_state.apply_fn(train_state.params, obs)
         action = pi.sample(seed=rng_action)
         log_prob = pi.log_prob(action)
-        value, action, log_prob = (
-            value.squeeze(0),
-            action.squeeze(0),
-            log_prob.squeeze(0),
-        )
 
         next_obs, env_state, reward, done, info = jax.vmap(
             env.step, in_axes=(0, 0, 0, None)
         )(jax.random.split(rng_step, num_envs), env_state, action, env_params)
 
-        carry = (rng, train_state, hstate, next_obs, env_state, done)
+        carry = (rng, train_state, next_obs, env_state)
         return carry, (obs, action, reward, done, log_prob, value, info)
 
-    (rng, train_state, hstate, last_obs, last_env_state, last_done), traj = jax.lax.scan(
+    (rng, train_state, last_obs, last_env_state), traj = jax.lax.scan(
         sample_step,
         (
             rng,
             train_state,
-            init_hstate,
             init_obs,
             init_env_state,
-            jnp.zeros(num_envs, dtype=bool),
         ),
         None,
         length=max_episode_length,
     )
 
-    x = jax.tree_map(lambda x: x[None, ...], (last_obs, last_done))
-    _, _, last_value = train_state.apply_fn(train_state.params, x, hstate)
+    _, last_value = train_state.apply_fn(train_state.params,last_obs)
+    return (rng, train_state, last_obs, last_env_state, last_value), traj
 
-    return (rng, train_state, hstate, last_obs, last_env_state, last_value.squeeze(0)), traj
-
-def evaluate_rnn(
+def evaluate(
     rng: chex.PRNGKey,
     env: UnderspecifiedEnv,
     env_params: EnvParams,
     train_state: TrainState,
-    init_hstate: chex.ArrayTree,
     init_obs: Observation,
     init_env_state: EnvState,
     max_episode_length: int,
@@ -171,7 +157,6 @@ def evaluate_rnn(
         env (UnderspecifiedEnv): 
         env_params (EnvParams): 
         train_state (TrainState): 
-        init_hstate (chex.ArrayTree): Shape (num_levels, )
         init_obs (Observation): Shape (num_levels, )
         init_env_state (EnvState): Shape (num_levels, )
         max_episode_length (int): 
@@ -182,12 +167,11 @@ def evaluate_rnn(
     num_levels = jax.tree_util.tree_flatten(init_obs)[0][0].shape[0]
     
     def step(carry, _):
-        rng, hstate, obs, state, done, mask, episode_length = carry
+        rng, obs, state, done, mask, episode_length = carry
         rng, rng_action, rng_step = jax.random.split(rng, 3)
 
-        x = jax.tree_map(lambda x: x[None, ...], (obs, done))
-        hstate, pi, _ = train_state.apply_fn(train_state.params, x, hstate)
-        action = pi.sample(seed=rng_action).squeeze(0)
+        pi, _ = train_state.apply_fn(train_state.params,obs)
+        action = pi.sample(seed=rng_action)
 
         obs, next_state, reward, done, _ = jax.vmap(
             env.step, in_axes=(0, 0, 0, None)
@@ -196,13 +180,12 @@ def evaluate_rnn(
         next_mask = mask & ~done
         episode_length += mask
 
-        return (rng, hstate, obs, next_state, done, next_mask, episode_length), (state, reward)
+        return (rng, obs, next_state, done, next_mask, episode_length), (state, reward)
     
     (_, _, _, _, _, _, episode_lengths), (states, rewards) = jax.lax.scan(
         step,
         (
             rng,
-            init_hstate,
             init_obs,
             init_env_state,
             jnp.zeros(num_levels, dtype=bool),
@@ -215,10 +198,9 @@ def evaluate_rnn(
 
     return states, rewards, episode_lengths
 
-def update_actor_critic_rnn(
+def update_actor_critic(
     rng: chex.PRNGKey,
     train_state: TrainState,
-    init_hstate: chex.ArrayTree,
     batch: chex.ArrayTree,
     num_envs: int,
     n_steps: int,
@@ -234,7 +216,6 @@ def update_actor_critic_rnn(
     Args:
         rng (chex.PRNGKey): 
         train_state (TrainState): 
-        init_hstate (chex.ArrayTree): 
         batch (chex.ArrayTree): obs, actions, dones, log_probs, values, targets, advantages
         num_envs (int): 
         n_steps (int): 
@@ -249,15 +230,21 @@ def update_actor_critic_rnn(
         Tuple[Tuple[chex.PRNGKey, TrainState], chex.ArrayTree]: It returns a new rng, the updated train_state, and the losses. The losses have structure (loss, (l_vf, l_clip, entropy))
     """
     obs, actions, dones, log_probs, values, targets, advantages = batch
-    last_dones = jnp.roll(dones, 1, axis=0).at[0].set(False)
-    batch = obs, actions, last_dones, log_probs, values, targets, advantages
-    
+    batch_size = n_steps * num_envs
+    minibatch_size = batch_size // n_minibatch
+    batch_flat = (obs, actions, log_probs, values, targets, advantages)
+    batch_flat = jax.tree_map(
+        lambda x: x.reshape((batch_size, *x.shape[2:])),
+        batch_flat
+    )
+    obs_flat, actions_flat, log_probs_flat, values_flat, targets_flat, advantages_flat = batch_flat
+        
     def update_epoch(carry, _):
         def update_minibatch(train_state, minibatch):
-            init_hstate, obs, actions, last_dones, log_probs, values, targets, advantages = minibatch
+            obs, actions, last_dones, log_probs, values, targets, advantages = minibatch
             
             def loss_fn(params):
-                _, pi, values_pred = train_state.apply_fn(params, (obs, last_dones), init_hstate)
+                pi, values_pred = train_state.apply_fn(params, obs)
                 log_probs_pred = pi.log_prob(actions)
                 entropy = pi.entropy().mean()
 
@@ -280,19 +267,14 @@ def update_actor_critic_rnn(
 
         rng, train_state = carry
         rng, rng_perm = jax.random.split(rng)
-        permutation = jax.random.permutation(rng_perm, num_envs)
-        minibatches = (
-            jax.tree_map(
-                lambda x: jnp.take(x, permutation, axis=0)
-                .reshape(n_minibatch, -1, *x.shape[1:]),
-                init_hstate,
-            ),
-            *jax.tree_map(
-                lambda x: jnp.take(x, permutation, axis=1)
-                .reshape(x.shape[0], n_minibatch, -1, *x.shape[2:])
-                .swapaxes(0, 1),
-                batch,
-            ),
+        permutation = jax.random.permutation(rng_perm, batch_size)
+        batch_shuffled = jax.tree_map(
+            lambda x: jnp.take(x, permutation, axis=0),
+            (obs_flat, actions_flat, log_probs_flat, values_flat, targets_flat, advantages_flat)
+        )
+        minibatches = jax.tree_map(
+            lambda x: x.reshape((n_minibatch, minibatch_size, *x.shape[1:])),
+            batch_shuffled,
         )
         train_state, losses = jax.lax.scan(update_minibatch, train_state, minibatches)
         return (rng, train_state), losses
@@ -754,12 +736,11 @@ def main(config):
             return config["LR"] * frac
         obs, _ = env.reset_to_level(rng, sample_random_level(rng), env_params)
         obs = jax.tree_map(
-            lambda x: jnp.repeat(jnp.repeat(x[None, ...], config["NUM_ENVS"], axis=0)[None, ...], 256, axis=0),
+            lambda x: jnp.repeat(x[None, ...], config["NUM_ENVS"], axis=0),
             obs,
         )
-        init_x = (obs, jnp.zeros((256, config["NUM_ENVS"])))
         network = ActorCritic(env.action_space(env_params).n)
-        network_params = network.init(rng, init_x, ActorCritic.initialize_carry((config["NUM_ENVS"],)))
+        network_params = network.init(rng, obs) 
         tx = optax.chain(
             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
             optax.adam(learning_rate=linear_schedule, eps=1e-5),
@@ -800,12 +781,11 @@ def main(config):
             (
                 (rng, train_state, hstate, last_obs, last_env_state, last_value),
                 (obs, actions, rewards, dones, log_probs, values, info),
-            ) = sample_trajectories_rnn(
+            ) = sample_trajectories(
                 rng,
                 env,
                 env_params,
                 train_state,
-                ActorCritic.initialize_carry((config["NUM_ENVS"],)),
                 init_obs,
                 init_env_state,
                 config["NUM_ENVS"],
@@ -817,10 +797,9 @@ def main(config):
             sampler, _ = level_sampler.insert_batch(sampler, new_levels, scores, {"max_return": max_returns})
             
             # Update: train_state only modified if exploratory_grad_updates is on
-            (rng, train_state), losses = update_actor_critic_rnn(
+            (rng, train_state), losses = update_actor_critic(
                 rng,
                 train_state,
-                ActorCritic.initialize_carry((config["NUM_ENVS"],)),
                 (obs, actions, dones, log_probs, values, targets, advantages),
                 config["NUM_ENVS"],
                 config["NUM_STEPS"],
@@ -834,7 +813,7 @@ def main(config):
             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "mean_num_blocks": new_levels.wall_map.sum() / config["NUM_ENVS"],
+                "mean_num_nodes": new_levels.num_nodes.sum() / config["NUM_ENVS"],
             }
             
             train_state = train_state.replace(
@@ -858,12 +837,11 @@ def main(config):
             (
                 (rng, train_state, hstate, last_obs, last_env_state, last_value),
                 (obs, actions, rewards, dones, log_probs, values, info),
-            ) = sample_trajectories_rnn(
+            ) = sample_trajectories(
                 rng,
                 env,
                 env_params,
                 train_state,
-                ActorCritic.initialize_carry((config["NUM_ENVS"],)),
                 init_obs,
                 init_env_state,
                 config["NUM_ENVS"],
@@ -875,10 +853,9 @@ def main(config):
             sampler = level_sampler.update_batch(sampler, level_inds, scores, {"max_return": max_returns})
             
             # Update the policy using trajectories collected from replay levels
-            (rng, train_state), losses = update_actor_critic_rnn(
+            (rng, train_state), losses = update_actor_critic(
                 rng,
                 train_state,
-                ActorCritic.initialize_carry((config["NUM_ENVS"],)),
                 (obs, actions, dones, log_probs, values, targets, advantages),
                 config["NUM_ENVS"],
                 config["NUM_STEPS"],
@@ -892,7 +869,7 @@ def main(config):
                             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "mean_num_blocks": levels.wall_map.sum() / config["NUM_ENVS"],
+                "mean_num_nodes": levels.num_nodes.sum() / config["NUM_ENVS"],
             }
             
             train_state = train_state.replace(
@@ -920,12 +897,11 @@ def main(config):
             (
                 (rng, train_state, hstate, last_obs, last_env_state, last_value),
                 (obs, actions, rewards, dones, log_probs, values, info),
-            ) = sample_trajectories_rnn(
+            ) = sample_trajectories(
                 rng,
                 env,
                 env_params,
                 train_state,
-                ActorCritic.initialize_carry((config["NUM_ENVS"],)),
                 init_obs,
                 init_env_state,
                 config["NUM_ENVS"],
@@ -937,10 +913,9 @@ def main(config):
             sampler, _ = level_sampler.insert_batch(sampler, child_levels, scores, {"max_return": max_returns})
             
             # Update: train_state only modified if exploratory_grad_updates is on
-            (rng, train_state), losses = update_actor_critic_rnn(
+            (rng, train_state), losses = update_actor_critic(
                 rng,
                 train_state,
-                ActorCritic.initialize_carry((config["NUM_ENVS"],)),
                 (obs, actions, dones, log_probs, values, targets, advantages),
                 config["NUM_ENVS"],
                 config["NUM_STEPS"],
@@ -954,7 +929,7 @@ def main(config):
             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "mean_num_blocks": child_levels.wall_map.sum() / config["NUM_ENVS"],
+                "mean_num_nodes": child_levels.num_nodes.sum() / config["NUM_ENVS"],
             }
             
             train_state = train_state.replace(
@@ -995,12 +970,11 @@ def main(config):
         levels = Level.load_prefabs(config["EVAL_LEVELS"])
         num_levels = len(config["EVAL_LEVELS"])
         init_obs, init_env_state = jax.vmap(eval_env.reset_to_level, (0, 0, None))(jax.random.split(rng_reset, num_levels), levels, env_params)
-        states, rewards, episode_lengths = evaluate_rnn(
+        states, rewards, episode_lengths = evaluate(
             rng,
             eval_env,
             env_params,
             train_state,
-            ActorCritic.initialize_carry((num_levels,)),
             init_obs,
             init_env_state,
             env_params.max_steps_in_episode,

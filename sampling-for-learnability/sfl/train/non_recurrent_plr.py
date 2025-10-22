@@ -334,7 +334,6 @@ def update_actor_critic(
         rng, rng_perm = jax.random.split(rng)
         
         # --- MODIFIED ---: Permute the flattened batch
-        permutation = jax.random.permutation(rng_perm, batch_size)
         
         # --- REMOVED --- (Old sequence-based minibatching)
         # minibatches = (
