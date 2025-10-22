@@ -5,7 +5,7 @@ from functools import partial
 from minimax.envs.ltl_env.utils import *
 from jax import random
 class JaxUntilTaskSampler():
-    def __init__(self, propositions, min_levels=1, max_levels=4, min_conjunctions=1, max_conjunctions=4):
+    def __init__(self, propositions, min_levels=1, max_levels=3, min_conjunctions=1, max_conjunctions=2):
         self.prop_tokens = jnp.array([LTL_BASE_VOCAB[p] for p in propositions],dtype=jnp.int32)
         self.num_props = len(propositions)
         self.min_levels = min_levels
@@ -162,7 +162,7 @@ class JaxEventuallySampler:
     The sampler's static configuration is provided during initialization, and
     the JIT compilation happens once.
     """
-    def __init__(self, propositions, min_levels=1, max_levels=4, min_conjunctions=1, max_conjunctions=4, max_nodes=MAX_NODES):
+    def __init__(self, propositions, min_levels=1, max_levels=5, min_conjunctions=1, max_conjunctions=4, max_nodes=MAX_NODES):
         self.propositions = jnp.array([LTL_BASE_VOCAB[p] for p in propositions],dtype=jnp.int32)
         self.min_levels = min_levels
         self.max_levels = max_levels

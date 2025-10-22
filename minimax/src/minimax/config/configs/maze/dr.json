@@ -7,7 +7,7 @@
     "n_devices": [1],
     "student_model_name": ["default_student_cnn"],
     "env_name": ["Maze"],
-    "verbose": [true],
+    "verbose": [false],
     "log_dir": ["~/logs/minimax"],
     "log_interval": [10],
     "from_last_checkpoint": [true],

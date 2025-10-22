@@ -122,16 +122,17 @@ class JaxASTBuilder:
         # We can also set the edge type to 'self' for padded edges.
         final_edge_types = jnp.where(is_padded_edge_mask, edge_types['self'], edge_types_clean)
 
-        # === 4. Edge Feature Construction ===
-        edge_features = jax.nn.one_hot(final_edge_types, num_classes=NUM_EDGE_TYPES, dtype=jnp.float32)
-        # Mask out features for padded edges to ensure they are zero.
-        edge_features = edge_features * (~is_padded_edge_mask)[:, None]
+        # # === 4. Edge Feature Construction ===
+        # edge_features = jax.nn.one_hot(final_edge_types, num_classes=NUM_EDGE_TYPES, dtype=jnp.float32)
+        # # Mask out features for padded edges to ensure they are zero.
+        # edge_features = edge_features * (~is_padded_edge_mask)[:, None]
 
         return OrderedDict([
             ('nodes', node_features),
             ('senders', final_senders),
             ('receivers', final_receivers),
             ('n_node', jnp.array([num_nodes])),
+            ('edge_types', final_edge_types)
         ])
 
 

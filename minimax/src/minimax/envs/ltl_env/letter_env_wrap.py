@@ -117,7 +117,7 @@ class LTLEnv(environment.Environment):
         'senders' : spaces.Box(low=0, high=MAX_NODES - 1, shape=(MAX_NODES*3,), dtype=np.int32),
         'receivers' :  spaces.Box(low=0, high=MAX_NODES - 1, shape=(MAX_NODES*3,), dtype=np.int32),
         'n_node' : spaces.Box(low=0, high=MAX_NODES, shape=(1,), dtype=np.int32),
-        'edge_types' : spaces.Box(low=0, high=3, shape=(MAX_NODES*3,), dtype=jnp.int32)
+    
         
     })
 

@@ -1,9 +1,9 @@
 # NVCC_RESULT := $(shell which nvcc 2> NULL; rm NULL)
 # NVCC_TEST := $(notdir $(NVCC_RESULT))
 # ifeq ($(NVCC_TEST),nvcc)
-GPUS=--gpus all
+#GPUS=--gpus all
 # else
-# GPUS=
+GPUS= make run
 # endif
 
 

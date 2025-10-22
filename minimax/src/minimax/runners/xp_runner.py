@@ -77,7 +77,7 @@ class ExperimentRunner:
 			env_name, 
 			env_kwargs, 
 			ued_env_kwargs)[0]
-		print(dummy_env.action_space())
+
 		# ---- Make agent ---- 
 		student_model_kwargs['output_dim'] = dummy_env.action_space().n
 		student_model = models.make(

@@ -325,7 +325,7 @@ class DRRunner:
 		return rollout, state, start_state, obs, carry, extra, ep_stats, train_state
 
 	@partial(jax.jit, static_argnums=(0,4))
-	def _compile_stats(self, update_stats, ep_stats, env_metrics=None, mask_passable=False):
+	def _compile_stats(self, update_stats, ep_stats, env_metrics=None, mask_passable=True):
 		stats = jax.vmap(lambda info: jax.tree_map(lambda x: x.mean(), info))(
 			{k:ep_stats[k] for k in self.rolling_stats.names}
 		)

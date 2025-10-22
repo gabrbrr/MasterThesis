@@ -181,43 +181,6 @@ def _get_model_info_maze_default(p, role):
 	return model_info
 
 
-def _get_model_info_letter_default(p, role):
-    """
-    Builds a compact string describing the LetterEnv ACModel configuration.
-
-    Example output:
-    h64_64_64_gnn32x2_cnn16_32_64_te32_od4_relu
-    """
-    # ---- CNN details ----
-    cnn_filters = p.get(f'{role}_cnn_filters', [16, 32, 64])
-    cnn_info = 'cnn' + '_'.join(map(str, cnn_filters))
-
-    # ---- GNN details ----
-    gnn_hidden_dims = p.get(f'{role}_gnn_hidden_dims', [32, 32])
-    gnn_output_dim = p.get(f'{role}_gnn_output_dim', 32)
-    gnn_info = f"gnn{'x'.join(map(str, gnn_hidden_dims))}_o{gnn_output_dim}"
-
-    # ---- Actor hidden layers ----
-    actor_hiddens = p.get(f'{role}_actor_hidden_dims', [64, 64, 64])
-    actor_info = 'h' + '_'.join(map(str, actor_hiddens))
-
-    # ---- Text embedding size ----
-    text_embed = p.get(f'{role}_text_embedding_size', 32)
-
-    # ---- Output dimension ----
-    output_dim = p.get(f'{role}_output_dim', 4)
-
-    # ---- Activation ----
-    base_activation = p.get(f'{role}_activation', 'relu')[:4]
-
-    model_info = (
-        f"{actor_info}_{gnn_info}_{cnn_info}_te{text_embed}_od{output_dim}_{base_activation}"
-    )
-
-    return model_info
-
-
-
 def _get_algo_info_ppo(p, role):
 	if role == 'student':
 		lr = str(p.lr)
@@ -264,9 +227,6 @@ MODEL_INFO_HANDLERS = {
 	'maze': {
 		'default_student_cnn': partial(_get_model_info_maze_default, role='student'),
 		'default_teacher_cnn': partial(_get_model_info_maze_default, role='teacher'),
-	},
-	'ltlenv': {
-		'letter_env_default': partial(_get_model_info_letter_default, role='student'),
 	},
 }
 
