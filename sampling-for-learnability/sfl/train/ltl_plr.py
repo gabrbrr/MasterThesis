@@ -705,7 +705,8 @@ def main(config):
         wandb.log(log_dict)
     
     # Setup the environment
-    env = LTLEnv(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=True, timeout=100, num_unique_letters=len(set(encode_letters("aabbccddeeffgghhiijjkkll"))), intrinsic: float = 0.0)
+
+    env = LTLEnv(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=True, timeout=100, num_unique_letters=len(set("aabbccddeeffgghhiijjkkll")), intrinsic= 0.0)
     eval_env = env
     sample_random_level = make_level_generator(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False )
     env_renderer = LTLEnvRenderer(env, tile_size=8)

@@ -114,7 +114,7 @@ def main(config):
     rng, _rng = jax.random.split(rng)
     obs, _ = env.reset_to_level(rng, sample_random_level(rng), env.default_params)
     obs = jax.tree_map(
-    lambda x: jnp.repeat(jnp.repeat(x[None, ...], t_config["NUM_ENVS"], axis=0)[None, ...], 256, axis=0),
+    lambda x: jnp.repeat(x[None, ...], t_config["NUM_ENVS"], axis=0)
         obs,
     )    
     init_x = obs
