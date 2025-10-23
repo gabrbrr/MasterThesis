@@ -8,10 +8,14 @@ from functools import partial
 from collections import OrderedDict
 from typing import Tuple
 
-from jaxued.environments import UnderspecifiedEnv # <-- Import UED base class
+from jaxued.environments import UnderspecifiedEnv 
 from ast import JaxASTBuilder
 from samplers import JaxUntilTaskSampler, JaxEventuallySampler
 from utils import *
+import progress
+from letter_env import LetterEnv, LetterEnvState, encode_letters
+from typing import Callable
+from gymnax.environments import spaces
 
 @struct.dataclass
 class Observation:
@@ -198,7 +202,6 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
         # Check for LTL success/failure (which we set in state.terminal)
         return jnp.logical_or(done_steps, state.terminal)
 
-    # --- Original Methods (mostly unchanged) ---
     
     def get_events(self, env_state: LetterEnvState) -> chex.Array:
         """Get current propositions from the underlying env using its state."""
@@ -234,7 +237,7 @@ def make_level_generator(
         grid_size=grid_size,
         letters=encoded_letters,
         use_fixed_map=use_fixed_map,
-        use_agent_centric_view=False, # Not relevant for level generation
+        use_agent_centric_view=True, 
         timeout=100,                  # Not relevant for level generation
         num_unique_letters=num_unique_letters
     )
@@ -248,7 +251,7 @@ def make_level_generator(
     ltl_sampler = JaxUntilTaskSampler(propositions)
 
     @jax.jit
-    def sample(key: chex.PRNGKey) -> LTLLevel:
+    def sample(key: chex.PRNGKey) -> Level:
         """
         JIT-compiled function to sample a single LTLLevel.
         """

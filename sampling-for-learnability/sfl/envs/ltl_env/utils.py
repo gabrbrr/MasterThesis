@@ -14,7 +14,7 @@ for i, el in enumerate(propositions):
     LTL_BASE_VOCAB[el] = PROP_OFFSET + i
 # Define constants AND OR ... for easier access
 globals().update({k.upper(): v for k, v in LTL_BASE_VOCAB.items() if v < PROP_OFFSET})
-
+NUM_PROPS = len(propositions)
 TRUE_VAL = LTL_BASE_VOCAB["True"]
 FALSE_VAL = LTL_BASE_VOCAB["False"]
 VOCAB_SIZE = len(LTL_BASE_VOCAB)
@@ -33,7 +33,6 @@ _is_binary_op_np[AND] = True
 _is_binary_op_np[OR] = True
 _is_binary_op_np[UNTIL] = True
 IS_BINARY_OP = jnp.array(_is_binary_op_np)
-LTL_BASE_VOCAB["propositions"]=propositions
 
 MAX_NODES = 200 # Maximum size of the formula array
 

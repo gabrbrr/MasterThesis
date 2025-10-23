@@ -1,0 +1,441 @@
+You need to remove all logic related to the recurrent hidden state (`hstate`). This involves changing your `ActorCritic` model, modifying how it's initialized and called during rollouts, and updating how the PPO loss function re-computes actions and values.
+
+Here are the specific changes required, organized by where they appear in your code.
+
+-----
+
+### 1\. Your `ActorCritic` Model (In `sfl.train.ltl_plr`)
+
+You must modify the `ActorCritic` class itself (which was imported but not defined in your code snippet).
+
+1.  **Remove `initialize_carry`:** Delete the `ActorCritic.initialize_carry` method. It is only for recurrent states.
+2.  **Change the `apply` (or `__call__`) method signature:**
+      * **Current (Recurrent):** `apply(self, params, (obs, done), hstate)`
+      * **New (Feedforward):** `apply(self, params, obs)`
+3.  **Update `apply`'s return value:**
+      * **Current:** `return new_hstate, pi, value`
+      * **New:** `return pi, value`
+4.  **Remove the RNN Layer:** Inside your model's `setup` or `apply` method, remove the `nn.RNN`, `nn.GRU`, or `nn.LSTM` layer. The model's core should now just be your encoder (e.g., CNN) followed by the actor and critic MLPs.
+
+-----
+
+### 2\. Model Initialization (In `main`)
+
+In your `main` function, change how the network is initialized.
+
+1.  **Remove `init_hstate`:**
+
+    ```python
+    # DELETE THIS (around line 90)
+    init_hstate = ActorCritic.initialize_carry((t_config["NUM_ENVS"], ))
+    ```
+
+2.  **Adjust `network.init` call:** The recurrent model's input was a tuple `(obs, dones)`. The new model just takes `obs`.
+
+    ```python
+    # AROUND LINE 89
+    # OLD:
+    # init_x = (obs, jnp.zeros((256, t_config["NUM_ENVS"])))
+    # init_hstate = ActorCritic.initialize_carry((t_config["NUM_ENVS"], ))
+    # network_params = network.init(_rng, init_x, init_hstate)
+
+    # NEW:
+    init_x = obs # The obs is already (256, num_envs, ...)
+    network_params = network.init(_rng, init_x)
+    ```
+
+-----
+
+### 3\. `get_learnability_set` Function
+
+This function runs rollouts and needs all `hstate` logic removed.
+
+1.  **Inside `_env_step`:**
+
+      * **Change `runner_state` unpacking:** Remove `hstate`.
+        ```python
+        # OLD:
+        # env_state, start_state, last_obs, last_done, hstate, rng = runner_state
+        # NEW:
+        env_state, start_state, last_obs, last_done, rng = runner_state
+        ```
+      * **Change `network.apply` call:** The input is now just `obs_batch` and it no longer takes or returns `hstate`.
+        ```python
+        # OLD:
+        # ac_in = (
+        #     jax.tree_map(lambda x: x[np.newaxis, :], obs_batch),
+        #     last_done[np.newaxis, :],
+        # )
+        # hstate, pi, value = network.apply(network_params, ac_in, hstate)
+
+        # NEW:
+        ac_in = obs_batch
+        pi, value = network.apply(network_params, ac_in)
+        ```
+      * **Update `runner_state` return:**
+        ```python
+        # OLD:
+        # runner_state = (env_state, start_state, obsv, done_batch, hstate, rng)
+        # NEW:
+        runner_state = (env_state, start_state, obsv, done_batch, rng)
+        ```
+
+2.  **In `get_learnability_set`'s main body:**
+
+      * **Remove `init_hstate`:**
+        ```python
+        # DELETE THIS (around line 235)
+        # init_hstate = ActorCritic.initialize_carry((BATCH_ACTORS,))
+        ```
+      * **Update `runner_state` initialization:**
+        ```python
+        # OLD:
+        # runner_state = (env_state, env_state, obsv, jnp.zeros((BATCH_ACTORS), dtype=bool), init_hstate, rng)
+        # NEW:
+        runner_state = (env_state, env_state, obsv, jnp.zeros((BATCH_ACTORS), dtype=bool), rng)
+        ```
+
+-----
+
+### 4\. `eval` Function (and `evaluate_ff` Helper)
+
+The `eval` function calls `evaluate_rnn`, which is incompatible. You must replace it with a feedforward (FF) version.
+
+1.  **Add this helper function** somewhere before your `eval` function:
+
+    ```python
+    @partial(jax.jit, static_argnames=("env", "apply_fn", "max_steps"))
+    def evaluate_ff(
+        rng: chex.PRNGKey,
+        env: LTLEnv,
+        env_params: Any,
+        train_state: TrainState,
+        init_obs: chex.ArrayTree,
+        init_env_state: Any,
+        max_steps: int,
+    ):
+        """Rolls out a feedforward policy in an environment."""
+
+        def _env_step(runner_state, _):
+            obs, env_state, rng = runner_state
+
+            # SELECT ACTION
+            rng, _rng = jax.random.split(rng)
+            pi, _ = train_state.apply_fn(train_state.params, obs)
+            action = pi.sample(seed=_rng)
+
+            # STEP ENV
+            rng, _rng = jax.random.split(rng)
+            # Get batch size from obs tree
+            batch_size = jax.tree_leaves(obs)[0].shape[0] 
+            rng_step = jax.random.split(_rng, batch_size) 
+            
+            next_obs, next_env_state, reward, done, info = jax.vmap(
+                env.step, in_axes=(0, 0, 0, None)
+            )(rng_step, env_state, action, env_params)
+            
+            runner_state = (next_obs, next_env_state, rng)
+            return runner_state, (env_state, reward, done)
+
+        # Run the rollout
+        runner_state = (init_obs, init_env_state, rng)
+        runner_state, (states, rewards, dones) = jax.lax.scan(
+            _env_step, runner_state, None, max_steps
+        )
+
+        # Calculate episode lengths
+        def get_ep_length(done_seq):
+            # Find first done
+            ep_len = jnp.argmax(done_seq, axis=0)
+            # If never done, use max_steps
+            ep_len = jnp.where((ep_len == 0) & (done_seq[0] == False), max_steps, ep_len) 
+            # Fix for episodes ending on step 0
+            ep_len = jnp.where((ep_len == 0) & (done_seq[0] == True), 1, ep_len) 
+            return ep_len
+
+        # vmap over the batch dimension (axis 1)
+        episode_lengths = jax.vmap(get_ep_length, in_axes=1)(dones)
+        
+        return states, rewards, episode_lengths
+    ```
+
+2.  **Inside your `eval` function:**
+
+      * **Replace the call to `evaluate_rnn`** with `evaluate_ff`:
+        ```python
+        # AROUND LINE 278
+        # OLD:
+        # states, rewards, episode_lengths = evaluate_rnn(
+        #     rng,
+        #     eval_env,
+        #     env.default_params,
+        #     train_state,
+        #     ActorCritic.initialize_carry((num_levels,)), # <-- REMOVE
+        #     init_obs,
+        #     init_env_state,
+        #     env.default_params.max_steps_in_episode,
+        # )
+
+        # NEW:
+        states, rewards, episode_lengths = evaluate_ff(
+            rng,
+            eval_env,
+            env.default_params,
+            train_state,
+            init_obs,
+            init_env_state,
+            env.default_params.max_steps_in_episode,
+        )
+        ```
+
+-----
+
+### 5\. `train_step` Function (Main Training Loop)
+
+This requires the most changes, affecting rollouts, GAE calculation, and the PPO update.
+
+1.  **Remove `init_hstate` at the start of `main`:**
+
+    ```python
+    # DELETE THIS (around line 130)
+    # init_hstate = ActorCritic.initialize_carry((t_config["NUM_ACTORS"],))
+    ```
+
+2.  **Inside `_env_step`:**
+
+      * **Change `runner_state` unpacking:** Remove `hstate`.
+        ```python
+        # OLD:
+        # train_state, env_state, start_state, last_obs, last_done, hstate, update_steps, rng = runner_state
+        # NEW:
+        train_state, env_state, start_state, last_obs, last_done, update_steps, rng = runner_state
+        ```
+      * **Change `network.apply` call:**
+        ```python
+        # OLD:
+        # ac_in = (
+        #     jax.tree_map(lambda x: x[np.newaxis, :], obs_batch),
+        #     last_done[np.newaxis, :],
+        # )
+        # hstate, pi, value = network.apply(train_state.params, ac_in, hstate)
+
+        # NEW:
+        ac_in = obs_batch
+        pi, value = network.apply(train_state.params, ac_in)
+        ```
+      * **Update `runner_state` return:**
+        ```python
+        # OLD:
+        # runner_state = (train_state, env_state, start_state, obsv, done_batch, hstate, update_steps, rng)
+        # NEW:
+        runner_state = (train_state, env_state, start_state, obsv, done_batch, update_steps, rng)
+        ```
+
+3.  **Before GAE Calculation:**
+
+      * **Remove `initial_hstate`:**
+        ```python
+        # DELETE THIS (around line 351)
+        # initial_hstate = runner_state[-3] 
+        ```
+      * **Unpack new `runner_state`:**
+        ```python
+        # OLD:
+        # train_state, env_state, start_state, last_obs, last_done, hstate, update_steps, rng = runner_state
+        # NEW:
+        train_state, env_state, start_state, last_obs, last_done, update_steps, rng = runner_state
+        ```
+      * **Change `last_val` calculation:**
+        ```python
+        # OLD:
+        # ac_in = (
+        #     jax.tree_map(lambda x: x[np.newaxis, :], last_obs_batch),
+        #     last_done[np.newaxis, :],
+        # )
+        # _, _, last_val = network.apply(train_state.params, ac_in, hstate)
+
+        # NEW:
+        ac_in = last_obs_batch
+        _, last_val = network.apply(train_state.params, ac_in)
+        ```
+
+4.  **Inside `_update_minbatch`:**
+
+      * **Change `batch_info` unpacking:**
+        ```python
+        # OLD:
+        # init_hstate, traj_batch, advantages, targets = batch_info
+        # NEW:
+        traj_batch, advantages, targets = batch_info
+        ```
+      * **Change `_loss_fn_masked` signature:**
+        ```python
+        # OLD:
+        # def _loss_fn_masked(params, init_hstate, traj_batch, gae, targets):
+        # NEW:
+        def _loss_fn_masked(params, traj_batch, gae, targets):
+        ```
+      * **Replace the `network.apply` call inside the loss function.** This is critical. You must flatten the time and batch dimensions, run the feedforward model, and then unflatten the results.
+        ```python
+        # OLD (Recurrent):
+        # # RERUN NETWORK
+        # _, pi, value = network.apply(
+        #     params,
+        #     (traj_batch.obs, traj_batch.done),
+        #     jax.tree_map(lambda x: x.transpose(), init_hstate),
+        # )
+        # log_prob = pi.log_prob(traj_batch.action)
+
+        # NEW (Feedforward):
+        # RERUN NETWORK
+        # Flatten time and batch dimensions for feedforward model
+        T, B = traj_batch.action.shape[0], traj_batch.action.shape[1]
+        obs_flat = jax.tree_map(
+            lambda x: x.reshape((T * B,) + x.shape[2:]), traj_batch.obs
+        )
+        act_flat = traj_batch.action.reshape((T * B,) + traj_batch.action.shape[2:])
+
+        # Apply network
+        pi, value_flat = network.apply(params, obs_flat)
+
+        # Reshape outputs back to (Time, Batch, ...)
+        value = value_flat.squeeze().reshape(T, B)
+        log_prob_flat = pi.log_prob(act_flat)
+        log_prob = log_prob_flat.reshape(T, B)
+        ```
+      * **Change `grad_fn` call:**
+        ```python
+        # OLD:
+        # total_loss, grads = grad_fn(
+        #     train_state.params, init_hstate, traj_batch, advantages, targets
+        # )
+        # NEW:
+        total_loss, grads = grad_fn(
+            train_state.params, traj_batch, advantages, targets
+        )
+        ```
+
+5.  **Inside `_update_epoch`:**
+
+      * **Change `update_state` unpacking:**
+        ```python
+        # OLD:
+        # (train_state, init_hstate, traj_batch, advantages, targets, rng) = update_state
+        # NEW:
+        (train_state, traj_batch, advantages, targets, rng) = update_state
+        ```
+      * **Remove `init_hstate` from batch creation:**
+        ```python
+        # OLD:
+        # init_hstate = jax.tree_map(lambda x: jnp.reshape(
+        #     x, (256, t_config["NUM_ACTORS"])
+        # ), init_hstate)
+        # batch = (
+        #     init_hstate,
+        #     traj_batch,
+        #     advantages.squeeze(),
+        #     targets.squeeze(),
+        # )
+
+        # NEW:
+        batch = (
+            traj_batch,
+            advantages.squeeze(),
+            targets.squeeze(),
+        )
+        ```
+      * **Change `update_state` repacking:**
+        ```python
+        # OLD:
+        # update_state = (
+        #     train_state,
+        #     init_hstate,
+        #     traj_batch,
+        #     advantages,
+        #     targets,
+        #     rng,
+        # )
+        # NEW:
+        update_state = (
+            train_state,
+            traj_batch,
+            advantages,
+            targets,
+            rng,
+        )
+        ```
+
+6.  **At the end of `train_step`:**
+
+      * **Remove `init_hstate` processing:**
+        ```python
+        # DELETE THIS (around line 520)
+        # init_hstate = jax.tree_map(lambda x: x[None, :].squeeze().transpose(), initial_hstate)
+        ```
+      * **Change `update_state` tuple:**
+        ```python
+        # OLD:
+        # update_state = (
+        #     train_state,
+        #     init_hstate,
+        #     traj_batch,
+        #     advantages,
+        #     targets,
+        #     rng,
+        # )
+        # NEW:
+        update_state = (
+            train_state,
+            traj_batch,
+            advantages,
+            targets,
+            rng,
+        )
+        ```
+      * **Change final `runner_state` creation:**
+        ```python
+        # OLD:
+        # hstate = ActorCritic.initialize_carry((t_config["NUM_ACTORS"],))
+        # runner_state = (train_state, env_state, start_state, obsv, jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool), hstate, update_steps, rng)
+
+        # NEW:
+        runner_state = (train_state, env_state, start_state, obsv, jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool), update_steps, rng)
+        ```
+
+-----
+
+### 6\. Initial `runner_state` (Before Main Loop)
+
+Finally, update the *very first* `runner_state` definition, which was truncated in your first code snippet and defined right before the code in your second snippet.
+
+```python
+    # AROUND LINE 720 (at the end of the first code block)
+    rng, _rng = jax.random.split(rng)
+    
+    # OLD:
+    # runner_state = (
+    #     train_state,
+    #     env_state,
+    #     start_state,
+    #     obsv,
+    #     jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool), # last_done
+    #     init_hstate, # <-- This was defined around line 130
+    #     0, # update_steps
+    #     _rng
+    # )
+
+    # NEW:
+    runner_state = (
+        train_state,
+        env_state,
+        start_state,
+        obsv,
+        jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool), # last_done
+        0, # update_steps
+        _rng
+    )
+    
+    # This is where your second code block starts
+    checkpoint_steps = t_config["NUM_UPDATES"] // t_config["EVAL_FREQ"] // t_config["NUM_CHECKPOINTS"]
+    ...
+```

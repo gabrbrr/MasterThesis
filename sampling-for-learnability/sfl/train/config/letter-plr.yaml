@@ -1,0 +1,13 @@
+defaults:
+  - env: minigrid
+  - learning: ippo-letter
+  - ued: plr
+  - _self_
+
+"SEED": 2
+"GROUP_NAME": "letter-plr"
+"ENTITY": ""
+"PROJECT": "letter"
+"WANDB_MODE" : "disabled"
+"SAVE_PATH": "checkpoints/new_letter"
+"CHECKPOINT_SAVE_INTERVAL": 0

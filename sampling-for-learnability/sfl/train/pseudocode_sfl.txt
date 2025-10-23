@@ -1,0 +1,351 @@
+Function Main(Config):
+    ## 1. Initialization
+    Initialize(Config)
+
+    ## 2. Main Training Loop
+    RunTrainingLoop(RunnerState)
+
+    ## 3. Final Save
+    SaveFinalModel(RunnerState)
+
+End Function
+
+//================================================
+//          Helper Functions
+//================================================
+
+Function Initialize(Config):
+    // Load and process configuration parameters
+    Load_Config(Config)
+    Calculate_Derived_Params(Config) // e.g., NUM_UPDATES, MINIBATCH_SIZE
+
+    // Setup experiment tracking
+    Log.Initialize("wandb", Config)
+
+    // Setup core components
+    MasterRNG = PRNG.CreateKey(Config.SEED)
+    Env = Create_Maze_Environment(Config.env)
+    EvalEnv = Create_Maze_Environment(Config.env)
+    LevelGenerator = Create_Level_Generator(Env)
+    
+    // Define and initialize the model
+    Network = ActorCritic(action_space)
+    LearningRateSchedule = Define_Linear_Schedule(Config.LR, Config.NUM_UPDATES)
+    Optimizer = Define_Optimizer(Adam, GradClip, LearningRateSchedule)
+    
+    // Get dummy data to initialize network
+    RNG, InitRNG = PRNG.Split(MasterRNG)
+    DummyObs, _ = Env.Reset(InitRNG, LevelGenerator(InitRNG))
+    DummyInput = Prepare_Batch(DummyObs, BatchSize=Config.NUM_ENVS)
+    DummyHiddenState = Network.Initialize_Carry(BatchSize=Config.NUM_ENVS)
+    
+    // Create the training state
+    RNG, InitRNG = PRNG.Split(RNG)
+    NetworkParams = Network.Init(InitRNG, DummyInput, DummyHiddenState)
+    TrainState = Create_TrainState(Network.Apply, NetworkParams, Optimizer)
+
+    // Initialize the parallel environments
+    RNG, ResetRNGs, LevelRNGs = PRNG.Split(RNG, 3)
+    InitialLevels = Parallel_Execute(LevelGenerator, LevelRNGs)
+    InitialObs, InitialEnvStates = Parallel_Execute(
+        Env.ResetToLevel, 
+        ResetRNGs, 
+        InitialLevels
+    )
+    InitialHiddenState = Network.Initialize_Carry(BatchSize=Config.NUM_ENVS)
+
+    // Bundle all persistent states into RunnerState
+    RunnerState = {
+        TrainState: TrainState,
+        EnvStates: InitialEnvStates,
+        LastObs: InitialObs,
+        LastDone: Zeros(Config.NUM_ENVS),
+        HiddenState: InitialHiddenState,
+        UpdateCount: 0,
+        RNG: RNG
+    }
+    
+    Return RunnerState
+End Function
+
+//------------------------------------------------
+
+Function RunTrainingLoop(RunnerState):
+    NumCycles = Config.NUM_UPDATES / Config.EVAL_FREQ
+    
+    For cycle in 1 to NumCycles:
+        StartTime = Time.Now()
+        
+        // Split RNG for this cycle
+        RNG, EvalRNG = PRNG.Split(RunnerState.RNG)
+        RunnerState.RNG = RNG
+
+        // Run one full train-and-evaluate cycle
+        (RunnerState, VizData, Metrics) = TrainAndEvalCycle(RunnerState, EvalRNG)
+        
+        EndTime = Time.Now()
+        
+        // Log results from the cycle
+        Log.Image("LevelBuffer", Render_Level_Grid(VizData.Scores, VizData.Levels))
+        Metrics.TimePerCycle = EndTime - StartTime
+        Metrics.StepsPerSecond = ...
+        Log.Metrics(Metrics, Step=RunnerState.UpdateCount)
+
+        // Save a checkpoint periodically
+        If cycle % Config.CHECKPOINT_FREQ == 0:
+            SaveModel(RunnerState.TrainState.Params, RunName, cycle)
+            Log.SaveArtifact(ModelPath)
+            
+End Function
+
+//------------------------------------------------
+
+Function TrainAndEvalCycle(RunnerState, CycleRNG):
+    // Split RNG for UED and Evaluation
+    UED_RNG, Eval_RNG = PRNG.Split(CycleRNG)
+
+    // 1. Run UED: Find a set of "learnable" levels
+    // This runs the current policy on many random levels to find
+    // those with a success rate near 0.5.
+    (LearnabilityScores, LearnableLevels) = GetLearnabilitySet(
+        UED_RNG, 
+        RunnerState.TrainState.Params
+    )
+    LevelBuffer = LearnableLevels // This buffer will be sampled for training
+
+    // 2. Run Training
+    // This runs TrainStep EVAL_FREQ times, updating the model
+    (RunnerState, TrainingMetrics) = Run_N_Steps(
+        TrainStep, 
+        Config.EVAL_FREQ, 
+        RunnerState, 
+        LevelBuffer
+    )
+
+    // 3. Run Evaluation
+    // This evaluates the *new* policy on a fixed set of test levels
+    EvaluationMetrics = EvaluatePolicy(
+        Eval_RNG, 
+        RunnerState.TrainState
+    )
+
+    // 4. Package results for logging
+    AllMetrics = Combine(
+        TrainingMetrics, 
+        EvaluationMetrics,
+        {"learnability_mean": Mean(LearnabilityScores)}
+    )
+    
+    // Get top levels from the buffer for visualization
+    TopScores, TopLevels = GetTopN(LearnabilityScores, LevelBuffer, N=20)
+    VizData = {Scores: TopScores, Levels: TopLevels}
+
+    Return (RunnerState, VizData, AllMetrics)
+End Function
+
+//------------------------------------------------
+
+Function GetLearnabilitySet(RNG, NetworkParams):
+    // Runs many parallel rollouts to score random levels
+    
+    Function RunBatchRollout(RNG):
+        // Generate a batch of new random levels
+        RNG, LevelRNGs, ResetRNGs = PRNG.Split(RNG, 3)
+        NewLevels = Parallel_Execute(LevelGenerator, LevelRNGs)
+        Obs, EnvStates = Parallel_Execute(Env.ResetToLevel, ResetRNGs, NewLevels)
+        
+        // Rollout policy for N steps on these levels
+        Trajectory = Run_Policy_Rollout(
+            NetworkParams, 
+            Obs, 
+            EnvStates, 
+            Config.ROLLOUT_STEPS
+        )
+        
+        // Calculate outcomes (e.g., success rate) for each level
+        Outcomes = Calculate_Episode_Outcomes(Trajectory)
+        
+        // Score is variance of success: success * (1 - success)
+        Learnability = Outcomes.SuccessRate * (1 - Outcomes.SuccessRate)
+        
+        Return (Learnability, NewLevels)
+    End Function
+
+    // Run the batch rollout many times
+    RNGs = PRNG.Split(RNG, Config.NUM_BATCHES)
+    (AllScores, AllLevels) = Parallel_Execute(RunBatchRollout, RNGs)
+    
+    // Find the best N levels
+    (TopScores, TopLevels) = GetTopN(
+        Flatten(AllScores), 
+        Flatten(AllLevels), 
+        N=Config.NUM_TO_SAVE
+    )
+    
+    Return (TopScores, TopLevels)
+End Function
+
+//------------------------------------------------
+
+Function TrainStep(RunnerState, LevelBuffer):
+    // This is one full PPO update step
+    
+    // 1. COLLECT TRAJECTORIES
+    (RunnerState, TrajectoryBatch) = Run_Policy_Rollout(
+        RunnerState, 
+        Config.NUM_STEPS
+    )
+
+    // 2. CALCULATE ADVANTAGES (GAE)
+    LastValue = Network.GetValue(
+        RunnerState.TrainState.Params, 
+        RunnerState.LastObs, 
+        RunnerState.HiddenState
+    )
+    Advantages, Targets = Calculate_GAE(
+        TrajectoryBatch, 
+        LastValue, 
+        Config.GAMMA, 
+        Config.GAE_LAMBDA
+    )
+
+    // 3. UPDATE NETWORK (PPO)
+    Data = (TrajectoryBatch, Advantages, Targets, RunnerState.HiddenState)
+    NewTrainState, LossMetrics = Update_PPO(
+        RunnerState.TrainState, 
+        Data, 
+        Config.UPDATE_EPOCHS, 
+        Config.NUM_MINIBATCHES
+    )
+    RunnerState.TrainState = NewTrainState
+
+    // 4. LOGGING
+    TrainMetrics = Aggregate_Metrics(LossMetrics, TrajectoryBatch.Info)
+    Log.Callback(TrainMetrics) // Log metrics for this step
+
+    // 5. SAMPLE NEW ENVS FOR NEXT STEP
+    RNG, GenRNG, SampleRNG = PRNG.Split(RunnerState.RNG, 3)
+    
+    // Get some levels from the "learnable" buffer
+    SampledLevels = LevelBuffer.Sample(SampleRNG, Config.NUM_ENVS_FROM_SAMPLED)
+    // Generate some new random levels
+    GeneratedLevels = Parallel_Execute(LevelGenerator, GenRNG, Config.NUM_ENVS_TO_GENERATE)
+    
+    NextLevels = Concatenate(GeneratedLevels, SampledLevels)
+
+    // Reset environments to this new mix of levels
+    RNG, ResetRNGs = PRNG.Split(RNG, 2)
+    NextObs, NextEnvStates = Parallel_Execute(Env.ResetToLevel, ResetRNGs, NextLevels)
+    
+    // Update RunnerState for the next step
+    RunnerState.RNG = RNG
+    RunnerState.EnvStates = NextEnvStates
+    RunnerState.LastObs = NextObs
+    RunnerState.LastDone = Zeros(Config.NUM_ENVS)
+    RunnerState.HiddenState = Network.Initialize_Carry(BatchSize=Config.NUM_ENVS)
+    RunnerState.UpdateCount += 1
+    
+    Return (RunnerState, TrainMetrics)
+End Function
+
+//------------------------------------------------
+
+Function EvaluatePolicy(RNG, TrainState):
+    // Load the fixed set of evaluation levels
+    EvalLevels = Load_Levels(Config.EVAL_LEVELS)
+    NumLevels = Length(EvalLevels)
+
+    // Run N attempts on each level
+    Function RunAttempt(RNG):
+        RNG, ResetRNGs = PRNG.Split(RNG)
+        ResetRNGs = PRNG.Split(ResetRNGs, NumLevels)
+        
+        Obs, EnvStates = Parallel_Execute(EvalEnv.ResetToLevel, ResetRNGs, EvalLevels)
+        
+        // Rollout policy until done
+        Trajectory = Run_Policy_Rollout(
+            TrainState.Params, 
+            Obs, 
+            EnvStates, 
+            Config.MAX_STEPS
+        )
+        
+        // Get final outcomes
+        Outcomes = Calculate_Episode_Outcomes(Trajectory)
+        Return (Outcomes.CumulativeReward, Outcomes.SuccessRate)
+    End Function
+
+    RNGs = PRNG.Split(RNG, Config.EVAL_NUM_ATTEMPTS)
+    (AllRewards, AllSuccesses) = Parallel_Execute(RunAttempt, RNGs)
+    
+    // Average metrics across all attempts
+    Metrics = {
+        "eval_solve_rate_mean": Mean(AllSuccesses),
+        "eval_return_mean": Mean(AllRewards),
+        "eval_solve_rate_per_level": Mean(AllSuccesses, axis=0),
+        "eval_return_per_level": Mean(AllRewards, axis=0)
+    }
+    
+    Return Metrics
+End Function
+
+//------------------------------------------------
+
+Function Update_PPO(TrainState, Data, Epochs, Minibatches):
+    // PPO update logic
+    (Trajectory, Advantages, Targets, InitialHiddenState) = Data
+    
+    For epoch in 1 to Epochs:
+        RNG, ShuffleRNG = PRNG.Split(TrainState.RNG)
+        TrainState.RNG = RNG
+        
+        // Shuffle data
+        ShuffledData = Shuffle(Trajectory, Advantages, Targets, InitialHiddenState)
+        
+        // Split into minibatches
+        MinibatchData = Split_Into_Minibatches(ShuffledData, Minibatches)
+        
+        For mb in MinibatchData:
+            // Calculate gradients using the PPO loss function
+            (Loss, Grads), AuxMetrics = Calculate_Gradients(
+                PPO_Loss_Function, 
+                TrainState.Params, 
+                mb
+            )
+            
+            // Apply gradients to update the network
+            TrainState = TrainState.Apply_Gradients(Grads)
+    
+    Return TrainState, AuxMetrics
+End Function
+
+//------------------------------------------------
+
+Function PPO_Loss_Function(Params, Minibatch):
+    // Run the network again on the trajectory data
+    (NewPi, NewValue) = Network.Apply(
+        Params, 
+        Minibatch.Obs, 
+        Minibatch.InitialHiddenState
+    )
+    
+    // --- Actor Loss (Clipped) ---
+    NewLogProbs = NewPi.LogProb(Minibatch.Action)
+    Ratio = Exp(NewLogProbs - Minibatch.LogProb)
+    NormAdvantages = Normalize(Minibatch.Advantages)
+    LossActor1 = Ratio * NormAdvantages
+    LossActor2 = Clip(Ratio, 1.0 - Config.CLIP_EPS, 1.0 + Config.CLIP_EPS) * NormAdvantages
+    ActorLoss = -Mean(Min(LossActor1, LossActor2))
+    
+    // --- Critic Loss (Clipped) ---
+    ValueLoss = Mean(Square(NewValue - Minibatch.Targets)) // Simplified; original has clipping
+    
+    // --- Entropy Loss ---
+    Entropy = Mean(NewPi.Entropy())
+    
+    TotalLoss = ActorLoss + (Config.VF_COEF * ValueLoss) - (Config.ENT_COEF * Entropy)
+    
+    AuxMetrics = {ActorLoss, ValueLoss, Entropy, ...}
+    
+    Return TotalLoss, AuxMetrics
+End Function

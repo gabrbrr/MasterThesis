@@ -632,7 +632,7 @@ def compute_score(config, dones, values, max_returns, advantages):
     else:
         raise ValueError(f"Unknown score function: {config['SCORE_FUNCTION']}")
 
-@hydra.main(version_base=None, config_path="config", config_name="minigrid-plr")
+@hydra.main(version_base=None, config_path="config", config_name="letter-plr")
 def main(config):
     config = OmegaConf.to_container(config)
     
@@ -707,7 +707,7 @@ def main(config):
     # Setup the environment
     env = LTLEnv(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=True, timeout=100, num_unique_letters=len(set(encode_letters("aabbccddeeffgghhiijjkkll"))), intrinsic: float = 0.0)
     eval_env = env
-    sample_random_level = make_level_generator(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, )
+    sample_random_level = make_level_generator(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False )
     env_renderer = LTLEnvRenderer(env, tile_size=8)
     env = AutoReplayWrapper(env)
     env_params = env.default_params
