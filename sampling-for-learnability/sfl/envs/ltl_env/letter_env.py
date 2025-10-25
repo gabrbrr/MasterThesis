@@ -5,7 +5,7 @@ import chex
 from termcolor import colored
 from dataclasses import replace
 from functools import partial
-from minimax.envs.ltl_env.utils import encode_letters, VOCAB_INV
+from utils import encode_letters, VOCAB_INV
 
 
 @chex.dataclass
@@ -177,60 +177,3 @@ def _is_valid_map(map_array: chex.Array, grid_size: int) -> bool:
     reachable = jax.lax.fori_loop(0, max_iters, body, reachable)
     return (jnp.sum(reachable) == total_free) & free[0, 0]
 
-# --- Visualization methods (unchanged, but rely on correct self.params) ---
-def show(env: LetterEnv, state: EnvState):
-    grid_size = self.params.grid_size
-    unique_letter_ids = sorted(list(set(self.params.letters)))
-
-    for i in range(grid_size):
-        row = ""
-        for j in range(grid_size):
-            if jnp.all(state.agent == jnp.array([i, j])):
-                row += colored("A", "red") + " "
-            elif jnp.any(state.map[i, j]):
-                local_idx = int(jnp.argmax(state.map[i, j]))
-                global_id = unique_letter_ids[local_idx]
-                row += VOCAB_INV[int(global_id)] + " "
-            else:
-                row += ". "
-        print(row)
-    print(f"Step: {state.time}/{self.params.timeout}")
-
-# ... (show_features and main loop) ...
-
-# ---------------- Interactive main loop (example usage) ----------------
-if __name__ == "__mainx__":
-    str_to_action = {"w": 0, "s": 1, "a": 2, "d": 3}
-
-    env = LetterEnv()
-
-    # MODIFIED: Create self.params instance with the new required field
-    letters_tuple = encode_letters("aabbccddee")
-    self.params = Envself.params(
-        grid_size=5,
-        letters=letters_tuple,
-        use_fixed_map=False,
-        use_agent_centric_view=False,
-        timeout=10,
-        num_unique_letters=len(set(letters_tuple))
-    )
-    key = jax.random.PRNGKey(0)
-
-    # The rest of the main loop is unchanged
-    while True:
-        obs, state = env.reset_env(key, self.params)
-        while True:
-            show(env, state, self.params)
-            # show_features(env, obs, self.params) # This would also need to be updated to use sorted unique letters
-            a = input("\nAction? (w/a/s/d) > ").strip()
-            if a not in str_to_action:
-                print("Forbidden action")
-                continue
-            key, subkey = jax.random.split(state.key)
-            obs, state, reward, done, _ = env.step_env(
-                subkey, state, str_to_action[a], self.params
-            )
-            if done:
-                print("\nEpisode finished.")
-                show(env, state, self.params)
-                break

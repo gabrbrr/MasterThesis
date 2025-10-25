@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from functools import partial
-from minimax.envs.ltl_env.utils import *
+from utils import *
 from jax import random
 class JaxUntilTaskSampler():
     def __init__(self, propositions, min_levels=1, max_levels=3, min_conjunctions=1, max_conjunctions=2):

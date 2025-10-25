@@ -689,13 +689,39 @@ def main(config):
         log_dict.update(train_state_info["log"])
 
         # images
-        log_dict.update({"images/highest_scoring_level": wandb.Image(np.array(stats["highest_scoring_level"]), caption="Highest scoring level")})
-        log_dict.update({"images/highest_weighted_level": wandb.Image(np.array(stats["highest_weighted_level"]), caption="Highest weighted level")})
+        img, enc_str, r_id, n_tokens = stats["highest_scoring_level"]
+        # Decode the caption (convert JAX/device arrays to NumPy for the external function)
+        caption_high_score = decode(np.array(enc_str), np.array(r_id), np.array(n_tokens))
+        log_dict.update({"images/highest_scoring_level": wandb.Image(np.array(img), caption=caption_high_score)})
 
+        # Repeat for the other single image
+        img, enc_str, r_id, n_tokens = stats["highest_weighted_level"]
+        caption_high_weight = decode_array_to_string(np.array(enc_str), np.array(r_id), np.array(n_tokens))
+        log_dict.update({"images/highest_weighted_level": wandb.Image(np.array(img), caption=caption_high_weight)})
+        
         for s in ['dr', 'replay', 'mutation']:
             if train_state_info['info'][f'num_{s}_updates'] > 0:
-                log_dict.update({f"images/{s}_levels": [wandb.Image(np.array(image)) for image in stats[f"{s}_levels"]]})
-
+                
+                # stats[f"{s}_levels"] is now a batched tuple (a PyTree):
+                # (images_batch, enc_strs_batch, r_ids_batch, n_tokens_batch)
+                images_batch, enc_strs_batch, r_ids_batch, n_tokens_batch = stats[f"{s}_levels"]
+                
+                wandb_images_with_captions = []
+                # Iterate over the batch
+                for i in range(len(images_batch)):
+                    # Get data for this single image
+                    img = images_batch[i]
+                    enc_str = enc_strs_batch[i]
+                    r_id = r_ids_batch[i]
+                    n_tokens = n_tokens_batch[i]
+                    
+                    # Decode the caption (convert JAX/device arrays to NumPy)
+                    caption = decode_array_to_string(np.array(enc_str), np.array(r_id), np.array(n_tokens))
+                    
+                    # Create the wandb.Image with its caption
+                    wandb_images_with_captions.append(wandb.Image(np.array(img), caption=caption))
+                
+                log_dict.update({f"images/{s}_levels": wandb_images_with_captions})
         # animations
         for i, level_name in enumerate(config["EVAL_LEVELS"]):
             frames, episode_length = stats["eval_animation"][0][:, i], stats["eval_animation"][1][i]
@@ -1003,8 +1029,8 @@ def main(config):
         
         # just grab the first run
         states, episode_lengths = jax.tree_map(lambda x: x[0], (states, episode_lengths)) # (num_steps, num_eval_levels, ...), (num_eval_levels,)
-        images = jax.vmap(jax.vmap(env_renderer.render_state, (0, None)), (0, None))(states, env_params) # (num_steps, num_eval_levels, ...)
-        frames = images.transpose(0, 1, 4, 2, 3) # WandB expects color channel before image dimensions when dealing with animations for some reason
+        images, _ , _, _ = jax.vmap(jax.vmap(env_renderer.render_state, (0, None)), (0, None))(states, env_params) # (num_steps, num_eval_levels, ...)
+        frames= images.transpose(0, 1, 4, 2, 3) # WandB expects color channel before image dimensions when dealing with animations for some reason
         
         metrics["update_count"] = train_state.num_dr_updates + train_state.num_replay_updates + train_state.num_mutation_updates
         metrics["eval_returns"] = eval_returns

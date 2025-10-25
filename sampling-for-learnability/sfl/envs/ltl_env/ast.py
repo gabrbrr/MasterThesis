@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 from functools import partial
 from typing import Callable, List, NamedTuple, Optional
-from minimax.envs.ltl_env.utils import *
+from utils import *
 from collections import namedtuple, OrderedDict
 
 edge_types = {"self": 0, "arg": 1, "arg1": 2, "arg2": 3}

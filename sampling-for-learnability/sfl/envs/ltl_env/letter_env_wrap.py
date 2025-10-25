@@ -10,7 +10,7 @@ from typing import Tuple
 
 from jaxued.environments import UnderspecifiedEnv 
 from ast import JaxASTBuilder
-from samplers import JaxUntilTaskSampler, JaxEventuallySampler
+from sampler import JaxUntilTaskSampler, JaxEventuallySampler
 from utils import *
 import progress
 from letter_env import LetterEnv, LetterEnvState, encode_letters

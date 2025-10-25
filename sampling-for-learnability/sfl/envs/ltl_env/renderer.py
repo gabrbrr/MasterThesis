@@ -7,7 +7,7 @@ from functools import partial
 # --- Assumed imports from your environment code ---
 # These classes are defined in your prompt.
 # We just need their type definitions for the renderer.
-from .letter_env_wrap import LTLEnv, EnvState, Level, EnvParams
+from letter_env_wrap import LTLEnv, EnvState, Level, EnvParams
 
 # --- Color Palette for Letters ---
 # A list of distinct RGB colors for the letter tiles.
@@ -124,16 +124,16 @@ class LTLEnvRenderer:
     def render_level(self, level: Level, env_params: EnvParams) -> chex.Array:
         """Renders a static Level representation."""
         # A Level contains the static map and agent start position
-        return self._render_grid(level.letter_map, level.agent_pos)
+        return (self._render_grid(level.letter_map, level.agent_pos),level.ltl_goal,level.ltl_root_idx,level.ltl_num_nodes)
 
     @partial(jax.jit, static_argnums=(0,))
     def render_state(self, env_state: EnvState, env_params: EnvParams) -> chex.Array:
         """Renders a full dynamic EnvState."""
         # The EnvState contains the inner LetterEnv state, which has the map and agent pos
-        return self._render_grid(
+        return (self._render_grid(
             env_state.env_state.map, 
             env_state.env_state.agent
-        )
+        ),env_state.ltl_goal,env_state.root_idx,env_state.num_valid_nodes)
 
     @partial(jax.jit, static_argnums=(0,))
     def _render_grid(self, letter_map: chex.Array, agent_pos: chex.Array) -> chex.Array:

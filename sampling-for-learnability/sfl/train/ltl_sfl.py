@@ -113,10 +113,7 @@ def main(config):
     # INIT NETWORK
     rng, _rng = jax.random.split(rng)
     obs, _ = env.reset_to_level(rng, sample_random_level(rng), env.default_params)
-    obs = jax.tree_map(
-    lambda x: jnp.repeat(x[None, ...], t_config["NUM_ENVS"], axis=0)
-        obs,
-    )    
+    obs = jax.tree_map( lambda x: jnp.repeat(x[None, ...], t_config["NUM_ENVS"], axis=0), obs,)    
     init_x = obs
     network_params = network.init(_rng, init_x)
     if t_config["ANNEAL_LR"]:
@@ -620,7 +617,7 @@ def main(config):
         start_state = env_state
         
         update_steps = update_steps + 1
-        runner_state = (train_state, env_state, start_state, obsv, jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool),, update_steps, rng)
+        runner_state = (train_state, env_state, start_state, obsv, jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool), update_steps, rng)
         return (runner_state, instances), metric
     
     def log_buffer(learnability, states, epoch):
@@ -633,13 +630,14 @@ def main(config):
             score = learnability[i]            
             state = jax.tree_map(lambda x: x[i], states)
 
-            img = env_renderer.render_state(
+            img, encoded_formula, root_id, num_nodes = env_renderer.render_state(
                 state.env_state, env.default_params
             )
             # env.init_render(ax, state, lidar=False, ticks_off=True)
             ax.imshow(img)
+            string_formula = decode_array_to_formula(encoded_formula, root_id, num_nodes)
             ax.set_xticks([]); ax.set_yticks([])
-            ax.set_title(f'learnability: {score:.3f}')
+            ax.set_title(f'learnability: {score:.3f}\nformula: {string_formula}')
             ax.set_aspect('equal', 'box')
                         
         plt.tight_layout()
