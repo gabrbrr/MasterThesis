@@ -9,11 +9,11 @@ from collections import OrderedDict
 from typing import Tuple
 
 from jaxued.environments import UnderspecifiedEnv 
-from ast import JaxASTBuilder
-from sampler import JaxUntilTaskSampler, JaxEventuallySampler
-from utils import *
-import progress
-from letter_env import LetterEnv, LetterEnvState, encode_letters
+from sfl.envs.ltl_env.ast import JaxASTBuilder
+from sfl.envs.ltl_env.sampler import JaxUntilTaskSampler, JaxEventuallySampler
+from sfl.envs.ltl_env.utils import *
+import sfl.envs.ltl_env.progress
+from sfl.envs.ltl_env.letter_env import LetterEnv, LetterEnvState, encode_letters
 from typing import Callable
 from gymnax.environments import spaces
 
@@ -93,7 +93,7 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
         # 1. Create the base LetterEnv state from the level
         base_env_state = LetterEnvState(
             agent=level.agent_pos,
-            letter_map=level.map,
+            map=level.letter_map,
             time=0,
             num_episodes=0,
             key=key

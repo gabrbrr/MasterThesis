@@ -1,15 +1,14 @@
 import jax
 import jax.numpy as jnp
-from minimax.envs import spaces
+from gymnax.environments import spaces
 import chex
-from termcolor import colored
 from dataclasses import replace
 from functools import partial
-from utils import encode_letters, VOCAB_INV
+from sfl.envs.ltl_env.utils import encode_letters, VOCAB_INV
 
 
 @chex.dataclass
-class EnvState:
+class LetterEnvState:
     agent: chex.Array
     map: chex.Array
     time: int
@@ -29,32 +28,32 @@ class LetterEnv():
     
 
     @partial(jax.jit, static_argnames=("self"))
-    def reset_env(self, key: chex.Array) -> tuple[chex.Array, EnvState]:
+    def reset_env(self, key: chex.Array) -> tuple[chex.Array, LetterEnvState]:
         """Reset environment, sample valid map, place agent at (0,0)."""
-        letters_arr = jnp.array(self.params.letters, dtype=jnp.int32)
+        letters_arr = jnp.array(self.params["letters"], dtype=jnp.int32)
 
-        unique_letter_ids = jnp.unique(letters_arr, size=self.params.num_unique_letters)
+        unique_letter_ids = jnp.unique(letters_arr, size=self.params["num_unique_letters"])
 
         local_letter_ids = jnp.searchsorted(unique_letter_ids, letters_arr)
 
-        locations = jnp.array([(i, j) for i in range(self.params.grid_size)
-                               for j in range(self.params.grid_size) if (i, j) != (0, 0)])
+        locations = jnp.array([(i, j) for i in range(self.params["grid_size"])
+                               for j in range(self.params["grid_size"]) if (i, j) != (0, 0)])
 
         def sample_map(rng):
             rng, subkey = jax.random.split(rng)
             perm = jax.random.permutation(subkey, len(locations))
-            indices = perm[:len(self.params.letters)]
+            indices = perm[:len(self.params["letters"])]
             chosen = locations[indices]
-            map_array = jnp.zeros((self.params.grid_size, self.params.grid_size, self.params.num_unique_letters), dtype=jnp.uint8)
+            map_array = jnp.zeros((self.params["grid_size"], self.params["grid_size"], self.params["num_unique_letters"]), dtype=jnp.uint8)
             map_array = map_array.at[chosen[:, 0], chosen[:, 1], local_letter_ids].set(1)
             return map_array, rng
 
         def try_sample_map(rng):
             map_array, new_rng = sample_map(rng)
-            is_valid = _is_valid_map(map_array, self.params.grid_size)
+            is_valid = _is_valid_map(map_array, self.params["grid_size"])
             return map_array, is_valid, new_rng
 
-        empty_map = jnp.zeros((self.params.grid_size, self.params.grid_size, self.params.num_unique_letters), dtype=jnp.uint8)
+        empty_map = jnp.zeros((self.params["grid_size"], self.params["grid_size"], self.params["num_unique_letters"]), dtype=jnp.uint8)
 
         def cond_fn(state):
             _, is_valid, _ = state
@@ -65,60 +64,60 @@ class LetterEnv():
             rng, sub = jax.random.split(rng)
             return try_sample_map(sub)
 
-        init_key = key if self.params.use_fixed_map else jax.random.split(key)[0]
+        init_key = key if self.params["use_fixed_map"] else jax.random.split(key)[0]
         map_array, _, rng = jax.lax.while_loop(cond_fn, body_fn, (empty_map, False, init_key))
 
-        state = EnvState(
+        state = LetterEnvState(
             agent=jnp.array([0, 0]), map=map_array, time=0, num_episodes=0, key=rng
         )
         obs = self._get_observation(state)
         return obs, state
 
     @partial(jax.jit, static_argnames=("self"))
-    def step_env(self, key: chex.Array, state: EnvState, action: int) -> tuple[chex.Array, float, bool, dict, EnvState]:
+    def step_env(self, key: chex.Array, state: LetterEnvState, action: int) -> tuple[chex.Array, float, bool, dict, LetterEnvState]:
         di, dj = self.actions[action]
-        agent_i = (state.agent[0] + di + self.params.grid_size) % self.params.grid_size
-        agent_j = (state.agent[1] + dj + self.params.grid_size) % self.params.grid_size
+        agent_i = (state.agent[0] + di + self.params["grid_size"]) % self.params["grid_size"]
+        agent_j = (state.agent[1] + dj + self.params["grid_size"]) % self.params["grid_size"]
         new_agent = jnp.array([agent_i, agent_j])
         new_time = state.time + 1
         new_state = replace(state, agent=new_agent, time=new_time, key=key)
 
         obs = self._get_observation(new_state)
         reward = 0.0
-        done = new_time > self.params.timeout
+        done = new_time > self.params["timeout"]
         info = {}
         return obs, new_state, reward, done, info, 
 
-    def _get_observation(self, state: EnvState) -> chex.Array:
-        obs = jnp.zeros((self.params.grid_size, self.params.grid_size, self.params.num_unique_letters + 1), dtype=jnp.uint8)
+    def _get_observation(self, state: LetterEnvState) -> chex.Array:
+        obs = jnp.zeros((self.params["grid_size"], self.params["grid_size"], self.params["num_unique_letters"] + 1), dtype=jnp.uint8)
         c_map, agent = state.map, state.agent
 
-        if self.params.use_agent_centric_view:
+        if self.params["use_agent_centric_view"]:
             c_map, agent = self._get_centric_map(state)
 
         obs = obs.at[:, :, :-1].set(c_map)
         obs = obs.at[agent[0], agent[1], -1].set(1)
         return obs
 
-    def _get_centric_map(self, state: EnvState) -> tuple[chex.Array, chex.Array]:
-        center = self.params.grid_size // 2
+    def _get_centric_map(self, state: LetterEnvState) -> tuple[chex.Array, chex.Array]:
+        center = self.params["grid_size"] // 2
         agent = jnp.array([center, center])
         delta = center - state.agent
-        grid_coords = jnp.arange(self.params.grid_size)
+        grid_coords = jnp.arange(self.params["grid_size"])
         ii, jj = jnp.meshgrid(grid_coords, grid_coords, indexing='ij')
-        src_ii = (ii - delta[0]) % self.params.grid_size
-        src_jj = (jj - delta[1]) % self.params.grid_size
+        src_ii = (ii - delta[0]) % self.params["grid_size"]
+        src_jj = (jj - delta[1]) % self.params["grid_size"]
         c_map = state.map[src_ii, src_jj]
         return c_map, agent
 
     @partial(jax.jit, static_argnames=("self"))
-    def get_events(self, state: EnvState) -> str:
+    def get_events(self, state: LetterEnvState) -> str:
         agent_pos = state.agent
         cell = state.map[agent_pos[0], agent_pos[1]]
         is_letter_pred = jnp.any(cell)
 
         # MODIFIED: Same fix as in reset_env
-        unique_letter_ids = jnp.unique(jnp.array(self.params.letters, dtype=jnp.int32), size=self.params.num_unique_letters)
+        unique_letter_ids = jnp.unique(jnp.array(self.params["letters"], dtype=jnp.int32), size=self.params["num_unique_letters"])
 
         def true_fn(_):
             local_idx = jnp.argmax(cell)
@@ -130,7 +129,7 @@ class LetterEnv():
         return jax.lax.cond(is_letter_pred, true_fn, false_fn, operand=None)
 
     def get_propositions(self) -> list:
-        unique_ids = sorted(list(set(self.params.letters)))
+        unique_ids = sorted(list(set(self.params["letters"])))
         return [VOCAB_INV[int(id_)] for id_ in unique_ids]
     
     def action_space(self) -> spaces.Discrete:
@@ -142,21 +141,21 @@ class LetterEnv():
         return spaces.Box(
             low=0,
             high=1,
-            shape=(self.params.grid_size, self.params.grid_size, self.params.num_unique_letters + 1),
+            shape=(self.params["grid_size"], self.params["grid_size"], self.params["num_unique_letters"] + 1),
             dtype=jnp.uint8
         )
 
     def state_space(self) -> spaces.Dict:
         """State space of the environment."""
         return spaces.Dict({
-            "agent": spaces.Box(low=0, high=self.params.grid_size - 1, shape=(2,), dtype=jnp.int32),
+            "agent": spaces.Box(low=0, high=self.params["grid_size"] - 1, shape=(2,), dtype=jnp.int32),
             "map": spaces.Box(
                 low=0,
                 high=1,
-                shape=(self.params.grid_size, self.params.grid_size, self.params.num_unique_letters),
+                shape=(self.params["grid_size"], self.params["grid_size"], self.params["num_unique_letters"]),
                 dtype=jnp.uint8
             ),
-            "time": spaces.Discrete(self.params.timeout + 1),
+            "time": spaces.Discrete(self.params["timeout"] + 1),
             "num_episodes": spaces.Box(low=0, high=jnp.iinfo(jnp.int32).max, shape=(), dtype=jnp.int32)
         })
 

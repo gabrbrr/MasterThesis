@@ -21,10 +21,11 @@ import chex
 from enum import IntEnum
 import hydra
 from omegaconf import OmegaConf
-
+from typing import Callable, Any
 from jaxued.environments.underspecified_env import EnvParams, EnvState, Observation, UnderspecifiedEnv
 
-from sfl.envs.ltl_env import Level, make_level_generator, LTLEnv, LTLEnvRenderer, make_level_mutator_minimax
+from sfl.envs.ltl_env.letter_env_wrap import Level, make_level_generator, LTLEnv, make_level_mutator_minimax
+from sfl.envs.ltl_env.renderer import LTLEnvRenderer
 from jaxued.level_sampler import LevelSampler
 from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
 from jaxued.wrappers import AutoReplayWrapper
@@ -288,7 +289,7 @@ def segment_sum(data: jnp.ndarray, segment_ids: jnp.ndarray, num_segments: int) 
     # Note: jax.ops.segment_sum is deprecated. Using jax.lax.segment_sum instead.
     # We pad segment_ids to avoid jax.lax.segment_sum's check.
     # This assumes segment_ids are contiguous from 0 to num_segments - 1.
-    return jax.lax.segment_sum(data, segment_ids, num_segments=num_segments)
+    return jax.ops.segment_sum(data, segment_ids, num_segments=num_segments)
 
 class RelationalUpdate(nn.Module):
     """
@@ -416,26 +417,9 @@ class RGCNRootShared_no_jraph(nn.Module):
             # Create segment_ids for segment_sum
             # This assumes nodes are packed contiguously per graph
             num_total_nodes = h.shape[0]
-            # Handle potential padding if n_node doesn't sum to total_nodes
-            if "n_node" in graph:
-                 segment_ids = jnp.repeat(jnp.arange(num_graphs), repeats=graph["n_node"])
-                 # If nodes are padded, we need to ensure segment_ids match h.shape[0]
-                 padding_size = num_total_nodes - segment_ids.shape[0]
-                 if padding_size > 0:
-                     # Pad with an unused segment ID (num_graphs), which will be ignored
-                     padding_ids = jnp.full(padding_size, num_graphs, dtype=jnp.int32)
-                     segment_ids = jnp.concatenate([segment_ids, padding_ids])
-                     # We need num_segments to be num_graphs + 1 to account for padding
-                     graph_embeddings = segment_sum(h * is_root_nodes, segment_ids, num_segments=num_graphs + 1)
-                     # Slice off the padding segment
-                     graph_embeddings = graph_embeddings[:num_graphs]
-                 else:
-                     graph_embeddings = segment_sum(h * is_root_nodes, segment_ids, num_segments=num_graphs)
-            else:
-                 # Fallback if n_node is not provided (assumes equal-sized graphs)
-                 num_nodes_per_graph = num_total_nodes // num_graphs
-                 segment_ids = jnp.repeat(jnp.arange(num_graphs), repeats=num_nodes_per_graph)
-                 graph_embeddings = segment_sum(h * is_root_nodes, segment_ids, num_segments=num_graphs)
+            num_nodes_per_graph = num_total_nodes // num_graphs
+            segment_ids = jnp.repeat(jnp.arange(num_graphs), repeats=num_nodes_per_graph)
+            graph_embeddings = segment_sum(h * is_root_nodes, segment_ids, num_segments=num_graphs)
         else: 
             graph_embeddings = jnp.zeros((0, h.shape[-1]))
 
@@ -766,7 +750,7 @@ def main(config):
             lambda x: jnp.repeat(x[None, ...], config["NUM_ENVS"], axis=0),
             obs,
         )
-        network = ActorCritic(env.action_space(env_params).n)
+        network = ActorCritic()
         network_params = network.init(rng, obs) 
         tx = optax.chain(
             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),

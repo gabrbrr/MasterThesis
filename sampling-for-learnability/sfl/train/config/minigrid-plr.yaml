@@ -6,8 +6,8 @@ defaults:
 
 "SEED": 2
 "GROUP_NAME": "minigrid-plr"
-"ENTITY": ""
+"ENTITY": "pamfil-1938844"
 "PROJECT": "minigrid"
-"WANDB_MODE" : "disabled"
+"WANDB_MODE" : "online"
 "SAVE_PATH": "checkpoints/new_minigrid"
 "CHECKPOINT_SAVE_INTERVAL": 0

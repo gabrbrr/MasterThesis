@@ -6,7 +6,7 @@ from typing import Dict, Tuple, List, Union
 from functools import partial
 import numpy as np
 import spot
-from utils import *
+from sfl.envs.ltl_env.utils import *
 
 def simplify_spot(array, node_index, num_valid_nodes):
     tuple_string_format=decode_array_to_formula(array, node_index, num_valid_nodes)

@@ -7,7 +7,7 @@ from functools import partial
 # --- Assumed imports from your environment code ---
 # These classes are defined in your prompt.
 # We just need their type definitions for the renderer.
-from letter_env_wrap import LTLEnv, EnvState, Level, EnvParams
+from sfl.envs.ltl_env.letter_env_wrap import LTLEnv, EnvState, Level, EnvParams
 
 # --- Color Palette for Letters ---
 # A list of distinct RGB colors for the letter tiles.

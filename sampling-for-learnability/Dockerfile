@@ -14,11 +14,55 @@ COPY --chown=${MYUSER} --chmod=765 . .
 # install from source if needed + all the requirements
 USER root
 
-# install tmux
+# install tmux, wget, and other build essentials
 RUN apt-get update && \
-    apt-get install -y tmux
+    apt-get install -y --no-install-recommends \
+        tmux git wget build-essential autoconf automake libtool \
+        flex bison groff texlive-latex-base latexmk graphviz \
+        python3-dev pkg-config && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN pip install -e .
+RUN pip install --no-cache-dir \
+    distrax \
+    wandb \
+    "tqdm>=4.66.0" \
+    chex \
+    matplotlib \
+    pillow \
+    wandb[media]
+
+
+    
+# Install SPOT
+RUN cd /tmp && \
+    wget http://www.lre.epita.fr/dload/spot/spot-2.14.2.tar.gz && \
+    tar xzf spot-2.14.2.tar.gz && \
+    cd spot-2.14.2 && \
+    ./configure && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    cd / && rm -rf /tmp/spot-2.14.2*
+
+# Fix the Python path issue - create symlink or set PYTHONPATH
+RUN ln -s /usr/local/lib/python3.10/site-packages/spot /usr/local/lib/python3.10/dist-packages/spot || \
+    echo "export PYTHONPATH=/usr/local/lib/python3.10/site-packages:\$PYTHONPATH" >> /etc/profile
+
+# OR use environment variable (preferred):
+ENV PYTHONPATH="/usr/local/lib/python3.10/site-packages:${PYTHONPATH}"
+
+# ------------------------------------------------------------
+
+# Now install your local package (which should pull in jaxmarl and jaxued)
+RUN pip install --no-cache-dir -e .
+
+
+# Add checks to verify dependencies
+RUN echo "--- PIP FREEZE ---" && \
+    pip freeze && \
+    echo "--- PIP CHECK ---" && \
+    pip check && \
+    echo "--- CHECK COMPLETE ---"
 
 # switch back to MY${MYUSER}# RUN chown -R ${MYUSER} /home/${MYUSER}
 # RUN chmod -R 777 /home/${MYUSER}
@@ -26,12 +70,12 @@ USER ${MYUSER}
 
 
 #disabling preallocation
-RUN export XLA_PYTHON_CLIENT_PREALLOCATE=false
+ENV  export XLA_PYTHON_CLIENT_PREALLOCATE=false
 #safety measures
-RUN export XLA_PYTHON_CLIENT_MEM_FRACTION=0.25 
-RUN export TF_FORCE_GPU_ALLOW_GROWTH=true
+ENV export XLA_PYTHON_CLIENT_MEM_FRACTION=0.25 
+ENV export TF_FORCE_GPU_ALLOW_GROWTH=true
 
 #for secrets and debug
-ENV WANDB_API_KEY=""
-ENV WANDB_ENTITY=""
+ENV WANDB_API_KEY="5ec7d61c4826bc3a4ec4059227d66685608968b5"
+ENV WANDB_ENTITY="pamfil-1938844"
 RUN git config --global --add safe.directory /home/${MYUSER}
