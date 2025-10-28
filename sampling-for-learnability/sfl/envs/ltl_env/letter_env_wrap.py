@@ -222,9 +222,15 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
         return dict(num_nodes_left=state.num_nodes)
    
 def make_level_generator(
-    grid_size=5, 
-    letters="abcdefghijkl", 
+    sampler,
+    min_levels, 
+    max_levels, 
+    min_conjunctions, 
+    max_conjunctions,
+    grid_size=7, 
+    letters="aabbccddeeffgghhiijjkkll", 
     use_fixed_map=False, 
+    
 ):
     """
     Creates a level generator function for the LTLEnv.
@@ -252,7 +258,10 @@ def make_level_generator(
 
     # 3. Instantiate the LTL sampler
     propositions = map_sampler_env.get_propositions()
-    ltl_sampler = JaxUntilTaskSampler(propositions)
+    if sampler == "avoidance":
+        ltl_sampler = JaxUntilTaskSampler(propositions,min_levels=min_levels, max_levels=max_levels, min_conjunctions=min_conjunctions, max_conjunctions=max_conjunctions)
+    elif sampler == "partially_ordered":
+        ltl_sampler = JaxEventuallySampler(propositions,min_levels=min_levels, max_levels=max_levels, min_conjunctions=min_conjunctions, max_conjunctions=max_conjunctions)
 
     @jax.jit
     def sample(key: chex.PRNGKey) -> Level:

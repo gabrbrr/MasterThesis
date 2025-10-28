@@ -162,25 +162,22 @@ class JaxEventuallySampler:
     The sampler's static configuration is provided during initialization, and
     the JIT compilation happens once.
     """
-    def __init__(self, propositions, min_levels=1, max_levels=5, min_conjunctions=1, max_conjunctions=4, max_nodes=MAX_NODES):
+    def __init__(self, propositions, min_levels=1, max_levels=5, min_conjunctions=1, max_conjunctions=4):
         self.propositions = jnp.array([LTL_BASE_VOCAB[p] for p in propositions],dtype=jnp.int32)
         self.min_levels = min_levels
         self.max_levels = max_levels
         self.min_conjunctions = min_conjunctions
         self.max_conjunctions = max_conjunctions
-        self.max_nodes = max_nodes
         assert(len(propositions) >= 3)
 
-        # Pre-compile the static sampler function with the instance's configuration.
         self._jitted_sampler = partial(
             jax.jit(self._static_sampler, static_argnames=(
-                "min_levels", "max_levels", "min_conjunctions", "max_conjunctions", "max_nodes"
+                "min_levels", "max_levels", "min_conjunctions", "max_conjunctions"
             )),
             min_levels=self.min_levels,
             max_levels=self.max_levels,
             min_conjunctions=self.min_conjunctions,
             max_conjunctions=self.max_conjunctions,
-            max_nodes=self.max_nodes,
             propositions=self.propositions
         )
 
@@ -195,11 +192,11 @@ class JaxEventuallySampler:
         return self._jitted_sampler(key=key)
 
     @staticmethod
-    def _static_sampler(key, propositions, min_levels, max_levels, min_conjunctions, max_conjunctions, max_nodes):
+    def _static_sampler(key, propositions, min_levels, max_levels, min_conjunctions, max_conjunctions):
         """
         The core JAX-jittable static method to generate LTL formulas.
         """
-        formula_array = jnp.zeros((max_nodes, 3), dtype=jnp.int32)
+        formula_array = jnp.zeros((MAX_NODES, 3), dtype=jnp.int32)
         
         key, subkey = random.split(key)
         num_conjs = random.randint(subkey, shape=(), minval=min_conjunctions, maxval=max_conjunctions + 1)

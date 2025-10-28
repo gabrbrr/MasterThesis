@@ -82,7 +82,7 @@ def main(config):
     
     env = LTLEnv(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=True, timeout=100, num_unique_letters=len(set("aabbccddeeffgghhiijjkkll")), intrinsic = 0.0)
     eval_env = env
-    sample_random_level = make_level_generator(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, )
+    sample_random_level = make_level_generator(**config["level_generators"]["SIMPLE_AVOIDANCE"])
     env_renderer = LTLEnvRenderer(env, tile_size=8)
     env = AutoReplayWrapper(env)
     t_config = config["learning"]
@@ -289,11 +289,15 @@ def main(config):
         This evaluates the current policy on the set of evaluation levels specified by config["EVAL_LEVELS"].
         It returns (states, cum_rewards, episode_lengths), with shapes (num_steps, num_eval_levels, ...), (num_eval_levels,), (num_eval_levels,)
         """
-        rng, rng_reset = jax.random.split(rng)
+        rng, rng_levels, rng_reset = jax.random.split(rng,3)
        # levels = Level.load_prefabs(config["EVAL_LEVELS"])
        # num_levels = len(config["EVAL_LEVELS"])
         #init_obs, init_env_state = jax.vmap(eval_env.reset_to_level, (0, 0, None))(jax.random.split(rng_reset, num_levels), levels, env.default_params)
-        new_levels = jax.vmap(sample_random_level)(rng_levels)
+        #new_levels = jax.vmap(sample_random_level)(rng_levels)
+        #init_obs, init_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(rng_reset, new_levels, env.default_params)
+        eval_sample_random_level = make_level_generator(**config["level_generators"]["COMPLEX_AVOIDANCE"])
+        new_levels = jax.vmap(eval_sample_random_level)(rng_levels)
+        # obsv, env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(rng_reset, new_levels, env.default_params)
         init_obs, init_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(rng_reset, new_levels, env.default_params)
         states, rewards, episode_lengths = evaluate(
             rng,
