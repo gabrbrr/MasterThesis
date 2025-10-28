@@ -12,7 +12,7 @@ from jaxued.environments import UnderspecifiedEnv
 from sfl.envs.ltl_env.ast import JaxASTBuilder
 from sfl.envs.ltl_env.sampler import JaxUntilTaskSampler, JaxEventuallySampler
 from sfl.envs.ltl_env.utils import *
-import sfl.envs.ltl_env.progress
+import sfl.envs.ltl_env.progress as progress
 from sfl.envs.ltl_env.letter_env import LetterEnv, LetterEnvState, encode_letters
 from typing import Callable
 from gymnax.environments import spaces

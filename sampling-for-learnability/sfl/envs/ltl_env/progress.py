@@ -97,7 +97,6 @@ def progress_and_clean_jax(formula_array, truth_assignment, root_index, num_node
         dirty_array,                 # Arguments to the callback
         dirty_root_idx,
         dirty_num_nodes,
-        vmap_method='sequential'
     )
 
     return simplified_array, simplified_root_idx, simplified_num_nodes

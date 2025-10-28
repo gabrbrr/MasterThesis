@@ -1,7 +1,10 @@
-# NVCC_RESULT := $(shell which nvcc 2> NULL; rm NULL)
-# NVCC_TEST := $(notdir $(NVCC_RESULT))
-GPUS= 
-USE_CUDA=true
+# Detect CUDA automatically
+NVCC_RESULT := $(shell which nvcc 2> /dev/null)
+NVCC_TEST := $(notdir $(NVCC_RESULT))
+
+GPUS = 
+USE_CUDA   = $(if $(GPUS),true,false)
+
 ifeq ($(USE_CUDA),true)
     TAG_SUFFIX=gpu
 else
@@ -9,10 +12,9 @@ else
 endif
 
 
-# Set flag for docker run command
-MYUSER=sfl_user
-BASE_FLAGS= -it   -v ${PWD}:/home/$(MYUSER) --shm-size 20G
-RUN_FLAGS=$(GPUS) $(BASE_FLAGS)
+# ---- User / registry settings ----
+MYUSER        = sfl_user
+VOLUME_NAME   = sfl_home
 DOCKER_IMAGE_NAME = $(MYUSER)-sfl
 LOCAL_TAG     = $(DOCKER_IMAGE_NAME)_$(TAG_SUFFIX):latest
 
@@ -20,12 +22,26 @@ LOCAL_TAG     = $(DOCKER_IMAGE_NAME)_$(TAG_SUFFIX):latest
 REGISTRY_USER = gabrbrr
 REMOTE_TAG    = $(REGISTRY_USER)/$(LOCAL_TAG)
 
-DOCKER_RUN=docker run $(RUN_FLAGS) $(REMOTE_TAG)
-ID = $(shell id -u)
+# ---- Runtime ----
+BASE_FLAGS = -it -v $(VOLUME_NAME):/home/$(MYUSER) --shm-size 20G
+RUN_FLAGS  = $(GPUS) $(BASE_FLAGS)
+DOCKER_RUN = docker run $(RUN_FLAGS) $(REMOTE_TAG)
+ID         = $(shell id -u)
 
-# make file commands
+
+# ---- Commands ----
+.PHONY: volume build run test push login
+
+volume:
+	docker volume create $(VOLUME_NAME)
+
 build:
-	DOCKER_BUILDKIT=1 docker build --build-arg USE_CUDA=$(USE_CUDA) --build-arg MYUSER=$(MYUSER) --build-arg UID=$(ID) --tag $(LOCAL_TAG) --progress=plain ${PWD}/.
+	DOCKER_BUILDKIT=1 docker build \
+		--build-arg USE_CUDA=$(USE_CUDA) \
+		--build-arg MYUSER=$(MYUSER) \
+		--build-arg UID=$(ID) \
+		--tag $(REMOTE_TAG) \
+		--progress=plain ${PWD}/.
 
 run:
 	$(DOCKER_RUN) /bin/bash
@@ -42,4 +58,3 @@ push:
 
 pull:
 	docker pull $(REMOTE_TAG)
-

@@ -60,3 +60,8 @@ q
 exit
 python3 -c "import spot; print(spot.version())"
 exit
+python3 sfl/train/ltl_plr.py
+python3 sfl/train/ltl_plr.py
+python3 sfl/train/ltl_plr.py
+python3 sfl/train/ltl_plr.py
+exit

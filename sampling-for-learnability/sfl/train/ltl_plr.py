@@ -111,7 +111,7 @@ def sample_trajectories(
         max_episode_length (int): The maximum episode length, i.e., the number of steps to do the rollouts for.
 
     Returns:
-        Tuple[Tuple[chex.PRNGKey, TrainState, Observation, EnvState, chex.Array], Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict]]: (rng, train_state, hstate, last_obs, last_env_state, last_value), traj, where traj is (obs, action, reward, done, log_prob, value, info). The first element in the tuple consists of arrays that have shapes (NUM_ENVS, ...) (except `rng` and and `train_state` which are singleton). The second element in the tuple is of shape (NUM_STEPS, NUM_ENVS, ...), and it contains the trajectory.
+        Tuple[Tuple[chex.PRNGKey, TrainState, Observation, EnvState, chex.Array], Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict]]: (rng, train_state, last_obs, last_env_state, last_value), traj, where traj is (obs, action, reward, done, log_prob, value, info). The first element in the tuple consists of arrays that have shapes (NUM_ENVS, ...) (except `rng` and and `train_state` which are singleton). The second element in the tuple is of shape (NUM_STEPS, NUM_ENVS, ...), and it contains the trajectory.
     """
     def sample_step(carry, _):
         rng, train_state, obs, env_state = carry
@@ -790,7 +790,7 @@ def main(config):
             init_obs, init_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(jax.random.split(rng_reset, config["NUM_ENVS"]), new_levels, env_params)
             # Rollout
             (
-                (rng, train_state, hstate, last_obs, last_env_state, last_value),
+                (rng, train_state, last_obs, last_env_state, last_value),
                 (obs, actions, rewards, dones, log_probs, values, info),
             ) = sample_trajectories(
                 rng,
@@ -846,7 +846,7 @@ def main(config):
             sampler, (level_inds, levels) = level_sampler.sample_replay_levels(sampler, rng_levels, config["NUM_ENVS"])
             init_obs, init_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(jax.random.split(rng_reset, config["NUM_ENVS"]), levels, env_params)
             (
-                (rng, train_state, hstate, last_obs, last_env_state, last_value),
+                (rng, train_state, last_obs, last_env_state, last_value),
                 (obs, actions, rewards, dones, log_probs, values, info),
             ) = sample_trajectories(
                 rng,
@@ -906,7 +906,7 @@ def main(config):
 
             # rollout
             (
-                (rng, train_state, hstate, last_obs, last_env_state, last_value),
+                (rng, train_state, last_obs, last_env_state, last_value),
                 (obs, actions, rewards, dones, log_probs, values, info),
             ) = sample_trajectories(
                 rng,
