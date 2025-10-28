@@ -42,6 +42,10 @@ class Level:
 class EnvParams:
     """UED-style episode parameters."""
     max_steps_in_episode: int = 100
+    min_conjunctions: int = 1
+    max_conjunctions: int = 3
+    min_disjunctions: int = 1
+    max_disjunctions: int = 3
 
 class EnvState(PyTreeNode):
     env_state: LetterEnvState   # Underlying LetterEnv state

@@ -242,7 +242,7 @@ def update_actor_critic(
         
     def update_epoch(carry, _):
         def update_minibatch(train_state, minibatch):
-            obs, actions, last_dones, log_probs, values, targets, advantages = minibatch
+            obs, actions, log_probs, values, targets, advantages = minibatch
             
             def loss_fn(params):
                 pi, values_pred = train_state.apply_fn(params,obs)
@@ -523,6 +523,7 @@ class ActorCritic(nn.Module):
             "edge_types": obs.edge_types,
             "n_node": obs.n_node,
         }
+        print(graph_dict["nodes"].shape,graph_dict["senders"].shape,graph_dict["receivers"].shape,graph_dict["edge_types"].shape,graph_dict["n_node"].shape )
         # Process text features with GNN
         embedding_gnn = self.gnn(graph_dict)
         # --- End Modification ---

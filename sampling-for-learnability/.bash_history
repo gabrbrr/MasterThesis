@@ -65,3 +65,20 @@ python3 sfl/train/ltl_plr.py
 python3 sfl/train/ltl_plr.py
 python3 sfl/train/ltl_plr.py
 exit
+python3 sfl/train/ltl_plr.py
+exit
+python3 sfl/train/ltl_plr.py
+python3 sfl/train/ltl_plr.py
+python3 sfl/train/ltl_sfl.py
+exit
+python3 sfl/train/ltl_sfl.py
+python3 sfl/train/ltl_sfl.py
+python3 sfl/train/ltl_sfl.py
+python3 sfl/train/ltl_sfl.py
+python3 sfl/train/ltl_sfl.py
+python3 sfl/train/ltl_sfl.py
+python3 sfl/train/ltl_sfl.py
+python3 sfl/train/ltl_sfl.py
+init_env_stateexit
+rxit
+exit

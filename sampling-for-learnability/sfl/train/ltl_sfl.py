@@ -23,9 +23,9 @@ import wandb
 import matplotlib.pyplot as plt
 from sfl.envs.ltl_env.utils import *
 from jaxued.wrappers import AutoReplayWrapper
-from sfl.envs.ltl_env import Level, make_level_generator, LTLEnv, LTLEnvRenderer, make_level_mutator_minimax
+from sfl.envs.ltl_env.letter_env_wrap import Level, make_level_generator, LTLEnv, make_level_mutator_minimax
+from sfl.envs.ltl_env.renderer import LTLEnvRenderer
 from sfl.train.train_utils import save_params
-
 
 class Transition(NamedTuple):
     global_done: jnp.ndarray
@@ -66,7 +66,7 @@ def main(config):
     config = OmegaConf.to_container(config)
     config["NUM_ENVS"] = config["learning"]["NUM_ENVS"]
     config["EVAL_NUM_ATTEMPTS"] = config["env"]["EVAL_NUM_ATTEMPTS"]
-    config["EVAL_LEVELS"] = config["env"]["EVAL_LEVELS"]
+    #config["EVAL_LEVELS"] = config["env"]["EVAL_LEVELS"]
     run = wandb.init(
         group=config["GROUP_NAME"],
         entity=config["ENTITY"],
@@ -100,7 +100,7 @@ def main(config):
         else t_config["CLIP_EPS"]
     )
         
-    network = ActorCritic(env.action_space(env.default_params).n)
+    network = ActorCritic()
 
 
     def linear_schedule(count):
@@ -113,12 +113,12 @@ def main(config):
     # INIT NETWORK
     rng, _rng = jax.random.split(rng)
     obs, _ = env.reset_to_level(rng, sample_random_level(rng), env.default_params)   
+    obs = jax.tree_map(
+    lambda x: jnp.repeat(x[None, ...], t_config["NUM_ENVS"], axis=0),
+        obs
+    ) 
     init_x = obs
     network_params = network.init(_rng, init_x)
-    vmapped_network_apply = jax.vmap(
-        network.apply, 
-        in_axes=(None, 0) 
-    )
     if t_config["ANNEAL_LR"]:
         tx = optax.chain(
             optax.clip_by_global_norm(t_config["MAX_GRAD_NORM"]),
@@ -130,7 +130,7 @@ def main(config):
             optax.adam(t_config["LR"], eps=1e-5),
         )
     train_state = TrainState.create(
-        apply_fn=vmapped_network_apply,
+        apply_fn=network.apply,
         params=network_params,
         tx=tx,
     )
@@ -168,12 +168,12 @@ def main(config):
         
         def _batch_step(unused, rng):
             def _env_step(runner_state, unused):
-                env_state, start_state, last_obs, rng = runner_state
+                env_state, start_state, last_obs, last_done, rng = runner_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
                 obs_batch = last_obs # batchify(last_obs, env.agents, BATCH_ACTORS)
-                pi, value = vmapped_network_apply(network_params, obs_batch)
+                pi, value = network.apply(network_params, obs_batch)
                 action = pi.sample(seed=_rng).squeeze()
                 log_prob = pi.log_prob(action)
                 env_act = action
@@ -195,13 +195,14 @@ def main(config):
                 # train_mask = batchify(info["terminated"], env.agents, BATCH_ACTORS).squeeze()
                 transition = Transition(
                     done, #(done["__all__"]),,
+                    last_done,
                     action.squeeze(),
                     value.squeeze(),
                     reward,
                     log_prob.squeeze(),
                     obs_batch,
                     train_mask,
-                    info,
+                    info
                 )
                 runner_state = (env_state, start_state, obsv, done_batch, rng)
                 return runner_state, transition
@@ -289,9 +290,11 @@ def main(config):
         It returns (states, cum_rewards, episode_lengths), with shapes (num_steps, num_eval_levels, ...), (num_eval_levels,), (num_eval_levels,)
         """
         rng, rng_reset = jax.random.split(rng)
-        levels = Level.load_prefabs(config["EVAL_LEVELS"])
-        num_levels = len(config["EVAL_LEVELS"])
-        init_obs, init_env_state = jax.vmap(eval_env.reset_to_level, (0, 0, None))(jax.random.split(rng_reset, num_levels), levels, env.default_params)
+       # levels = Level.load_prefabs(config["EVAL_LEVELS"])
+       # num_levels = len(config["EVAL_LEVELS"])
+        #init_obs, init_env_state = jax.vmap(eval_env.reset_to_level, (0, 0, None))(jax.random.split(rng_reset, num_levels), levels, env.default_params)
+        new_levels = jax.vmap(sample_random_level)(rng_levels)
+        init_obs, init_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(rng_reset, new_levels, env.default_params)
         states, rewards, episode_lengths = evaluate(
             rng,
             eval_env,
@@ -314,12 +317,12 @@ def main(config):
         num_env_instances = instances.agent_pos.shape[0]
 
         def _env_step(runner_state, unused):
-            train_state, env_state, start_state, last_obs, update_steps, rng = runner_state
+            train_state, env_state, start_state, last_obs, last_done, update_steps, rng = runner_state
 
             # SELECT ACTION
             rng, _rng = jax.random.split(rng)
             obs_batch = last_obs # batchify(last_obs, env.agents, t_config["NUM_ACTORS"])
-            pi, value = vmapped_network_apply(train_state.params, obs_batch)
+            pi, value = network.apply(train_state.params, obs_batch)
             action = pi.sample(seed=_rng).squeeze()
             log_prob = pi.log_prob(action)
             env_act = action
@@ -341,6 +344,7 @@ def main(config):
             # train_mask = batchify(info["terminated"], env.agents, t_config["NUM_ACTORS"]).squeeze()
             transition = Transition(
                 done,#["__all__"],
+                last_done,
                 action.squeeze(),
                 value.squeeze(),
                 reward,
@@ -378,9 +382,9 @@ def main(config):
         episodic_return_length = _calc_ep_return_by_agent(traj_batch.done, reward_by_env)
         episodic_return_length = jax.tree_map(lambda x: x.mean(), episodic_return_length)
         # CALCULATE ADVANTAGE
-        train_state, env_state, start_state, last_obs, update_steps, rng = runner_state
+        train_state, env_state, start_state, last_obs, last_done,  update_steps, rng = runner_state
         last_obs_batch = last_obs # batchify(last_obs, env.agents, t_config["NUM_ACTORS"])
-        _, _, last_val = vmapped_network_apply(train_state.params, last_obs_batch)
+        _, last_val = network.apply(train_state.params, last_obs_batch)
         last_val = last_val.squeeze()
         print('last_val shape', last_val.shape)
         def _calculate_gae(traj_batch, last_val):
@@ -423,7 +427,7 @@ def main(config):
                     act_flat = traj_batch.action.reshape((T * B,) + traj_batch.action.shape[2:])
 
                     # Apply network
-                    pi, value_flat = vmapped_network_apply(params, obs_flat)
+                    pi, value_flat = network.apply(params, obs_flat)
 
                     # Reshape outputs back to (Time, Batch, ...)
                     value = value_flat.reshape(T, B) # Or (T, B, 1) if it has a trailing dim
@@ -457,7 +461,8 @@ def main(config):
                     )
                     loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
                     loss_actor = loss_actor.mean(where=(1 - traj_batch.mask))
-                    entropy = pi.entropy().mean(where=(1 - traj_batch.mask))
+                    mask_flat = (1 - traj_batch.mask).reshape(-1)
+                    entropy = pi.entropy().mean(where=mask_flat)
                     
                     approx_kl = jax.lax.stop_gradient(
                         ((ratio - 1) - logratio).mean()
@@ -620,7 +625,7 @@ def main(config):
         start_state = env_state
         
         update_steps = update_steps + 1
-        runner_state = (train_state, env_state, start_state, obsv, jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool), update_steps, rng)
+        runner_state = (train_state, env_state, start_state, obsv,  jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool), update_steps, rng)
         return (runner_state, instances), metric
     
     def log_buffer(learnability, states, epoch):
@@ -690,7 +695,7 @@ def main(config):
         return runner_state, (learnabilty_scores.at[-20:].get(), top_states), test_metrics
     
     rng, _rng = jax.random.split(rng)
-    e = (
+    runner_state = (
         train_state,
         env_state,
         start_state,
