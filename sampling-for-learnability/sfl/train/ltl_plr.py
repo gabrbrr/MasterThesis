@@ -245,7 +245,7 @@ def update_actor_critic(
             obs, actions, last_dones, log_probs, values, targets, advantages = minibatch
             
             def loss_fn(params):
-                pi, values_pred = train_state.apply_fn(params, obs)
+                pi, values_pred = train_state.apply_fn(params,obs)
                 log_probs_pred = pi.log_prob(actions)
                 entropy = pi.entropy().mean()
 
@@ -760,7 +760,7 @@ def main(config):
         sampler = level_sampler.initialize(pholder_level, {"max_return": -jnp.inf})
         pholder_level_batch = jax.tree_map(lambda x: jnp.array([x]).repeat(config["NUM_ENVS"], axis=0), pholder_level)
         return TrainState.create(
-            apply_fn=network.apply,
+            apply_fn=  jax.vmap(network.apply, in_axes=(None, 0)),
             params=network_params,
             tx=tx,
             sampler=sampler,

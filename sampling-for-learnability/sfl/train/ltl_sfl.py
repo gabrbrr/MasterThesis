@@ -112,10 +112,13 @@ def main(config):
     
     # INIT NETWORK
     rng, _rng = jax.random.split(rng)
-    obs, _ = env.reset_to_level(rng, sample_random_level(rng), env.default_params)
-    obs = jax.tree_map( lambda x: jnp.repeat(x[None, ...], t_config["NUM_ENVS"], axis=0), obs,)    
+    obs, _ = env.reset_to_level(rng, sample_random_level(rng), env.default_params)   
     init_x = obs
     network_params = network.init(_rng, init_x)
+    vmapped_network_apply = jax.vmap(
+        network.apply, 
+        in_axes=(None, 0) 
+    )
     if t_config["ANNEAL_LR"]:
         tx = optax.chain(
             optax.clip_by_global_norm(t_config["MAX_GRAD_NORM"]),
@@ -127,7 +130,7 @@ def main(config):
             optax.adam(t_config["LR"], eps=1e-5),
         )
     train_state = TrainState.create(
-        apply_fn=network.apply,
+        apply_fn=vmapped_network_apply,
         params=network_params,
         tx=tx,
     )
@@ -170,7 +173,7 @@ def main(config):
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
                 obs_batch = last_obs # batchify(last_obs, env.agents, BATCH_ACTORS)
-                pi, value = network.apply(network_params, obs_batch)
+                pi, value = vmapped_network_apply(network_params, obs_batch)
                 action = pi.sample(seed=_rng).squeeze()
                 log_prob = pi.log_prob(action)
                 env_act = action
@@ -316,7 +319,7 @@ def main(config):
             # SELECT ACTION
             rng, _rng = jax.random.split(rng)
             obs_batch = last_obs # batchify(last_obs, env.agents, t_config["NUM_ACTORS"])
-            pi, value = network.apply(train_state.params, obs_batch)
+            pi, value = vmapped_network_apply(train_state.params, obs_batch)
             action = pi.sample(seed=_rng).squeeze()
             log_prob = pi.log_prob(action)
             env_act = action
@@ -377,7 +380,7 @@ def main(config):
         # CALCULATE ADVANTAGE
         train_state, env_state, start_state, last_obs, update_steps, rng = runner_state
         last_obs_batch = last_obs # batchify(last_obs, env.agents, t_config["NUM_ACTORS"])
-        _, _, last_val = network.apply(train_state.params, last_obs_batch)
+        _, _, last_val = vmapped_network_apply(train_state.params, last_obs_batch)
         last_val = last_val.squeeze()
         print('last_val shape', last_val.shape)
         def _calculate_gae(traj_batch, last_val):
@@ -420,7 +423,7 @@ def main(config):
                     act_flat = traj_batch.action.reshape((T * B,) + traj_batch.action.shape[2:])
 
                     # Apply network
-                    pi, value_flat = network.apply(params, obs_flat)
+                    pi, value_flat = vmapped_network_apply(params, obs_flat)
 
                     # Reshape outputs back to (Time, Batch, ...)
                     value = value_flat.reshape(T, B) # Or (T, B, 1) if it has a trailing dim
