@@ -38,6 +38,8 @@ class JaxUntilTaskSampler():
             - formula_array (jnp.ndarray): The encoded formula in a (MAX_NODES, 3) array.
             - num_nodes (int): The number of valid nodes used in the array.
             - root_idx (int): The index of the root node of the final formula.
+            - num_conjuncts (int): The number of conjunctions in the formula.
+            - num_levels (int): The total number of levels across all conjunctions.
         """
         # --- 1. Initial Setup and Random Sampling ---
         key, n_conjs_key, p_key = jax.random.split(key, 3)
@@ -105,12 +107,14 @@ class JaxUntilTaskSampler():
 
         def outer_loop_body(i, carry):
             """Builds one 'Until' task and ANDs it with the main formula."""
-            key, formula_array, node_idx, prop_idx, ltl_root_idx = carry
+            key, formula_array, node_idx, prop_idx, ltl_root_idx, total_levels = carry
             key, n_levels_key, build_key = jax.random.split(key, 3)
-
+            
             # Sample levels for this specific sub-formula
             n_levels = jax.random.randint(n_levels_key, (), self.min_levels, self.max_levels + 1)
-
+           
+            new_total_levels = total_levels + n_levels
+            
             # Build the sub-formula
             build_key, formula_array, new_node_idx, new_prop_idx, until_task_root = build_nested_until_task(
                 build_key, formula_array, node_idx, prop_idx, n_levels
@@ -133,7 +137,7 @@ class JaxUntilTaskSampler():
                 operand=None
             )
 
-            return key, formula_array, node_idx, new_prop_idx, new_ltl_root
+            return key, formula_array, node_idx, new_prop_idx, new_ltl_root, new_total_levels
 
         # --- 3. Execute Main Loop ---
 
@@ -144,15 +148,16 @@ class JaxUntilTaskSampler():
             jnp.full((MAX_NODES, 3), -1, dtype=jnp.int32), # Formula array
             0,                                             # Next available node index
             0,                                             # Next available proposition index
-            -1                                             # Root of the combined formula
+            -1,
+             0,                                                                                         # Root of the combined formula
         )
 
         # Run the loop for n_conjs iterations
-        _, final_array, num_nodes, _, root_idx = jax.lax.fori_loop(
+        _, final_array, num_nodes, _, root_idx, total_levels = jax.lax.fori_loop(
             0, n_conjs, outer_loop_body, initial_carry
         )
-
-        return final_array, num_nodes, root_idx
+        avg_levels = total_levels.astype(jnp.float32) / n_conjs.astype(jnp.float32)
+        return final_array, num_nodes, root_idx, n_conjs, avg_levels
 
 
 
@@ -257,12 +262,12 @@ class JaxEventuallySampler:
                 lambda: jax.lax.fori_loop(0, seq_length - 1, _build_nested_formula, init_build_state),
                 lambda: init_build_state)
 
-            return (key, formula_array, next_node_idx), final_root_id
+            return (key, formula_array, next_node_idx), final_root_id, seq_length
 
         def _main_conj_loop_body(i, state):
-            key, formula_array, next_node_idx, overall_root_id = state
-            (key, formula_array, next_node_idx), new_task_root_id = _sample_sequence_task((key, formula_array, next_node_idx), 0)
-            
+            key, formula_array, next_node_idx, overall_root_id, total_levels = state
+            (key, formula_array, next_node_idx), new_task_root_id, seq_length = _sample_sequence_task((key, formula_array, next_node_idx), 0)
+            new_total_levels = total_levels + seq_length
             def _combine_with_and(op):
                 prev_root_id, new_root_id, arr, idx = op
                 and_node_id = idx
@@ -275,11 +280,11 @@ class JaxEventuallySampler:
 
             formula_array, next_node_idx, overall_root_id = jax.lax.cond(
                 i > 0, _combine_with_and, _first_task, (overall_root_id, new_task_root_id, formula_array, next_node_idx))
-            return key, formula_array, next_node_idx, overall_root_id
+            return key, formula_array, next_node_idx, overall_root_id, new_total_levels
 
-        init_main_state = (key, formula_array, 0, -1)
-        key, formula_array, num_nodes, root_id = jax.lax.fori_loop(0, num_conjs, _main_conj_loop_body, init_main_state)
-        
-        return formula_array, num_nodes, root_id
+        init_main_state = (key, formula_array, 0, -1, 0)
+        key, formula_array, num_nodes, root_id, total_levels= jax.lax.fori_loop(0, num_conjs, _main_conj_loop_body, init_main_state)
+        avg_levels = total_levels.astype(jnp.float32) / num_conjs.astype(jnp.float32)
+        return formula_array, num_nodes, root_id, num_conjs, avg_levels
     
     

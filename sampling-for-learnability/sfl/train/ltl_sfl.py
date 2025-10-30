@@ -375,12 +375,17 @@ def main(config):
                 mask = (idxs > start_idx) & (idxs <= end_idx) & (end_idx != t_config["NUM_STEPS"])
                 r = jnp.sum(rews * mask, axis=0)
                 l = end_idx - start_idx
-                return r, l
+                ep_step_indices = idxs - (start_idx + 1)
+                discounts = t_config["GAMMA"] ** ep_step_indices
+                discounted_r = jnp.sum(rews * discounts * mask)
+                return r, l, discounted_r
             
             done_idxs = jnp.argwhere(dones, size=t_config["NUM_STEPS"]//4, fill_value=t_config["NUM_STEPS"]).squeeze()
             mask_done = jnp.where(done_idxs == t_config["NUM_STEPS"], 0, 1)
-            r, l = __ep_returns(returns, jnp.concatenate([jnp.array([-1]), done_idxs[:-1]]), done_idxs)                
-            return {"episodic_return_per_agent": r.mean(where=mask_done), "episodic_length_per_agent": l.mean(where=mask_done)}
+            r, l, discounted_r= __ep_returns(returns, jnp.concatenate([jnp.array([-1]), done_idxs[:-1]]), done_idxs)                
+            return {"episodic_return_per_agent": r.mean(where=mask_done),
+                     "episodic_length_per_agent": l.mean(where=mask_done),
+                     "episodic_discounted_return_per_agent": discounted_r.mean(where=mask_done)}
         
         reward_by_env = traj_batch.reward
         episodic_return_length = _calc_ep_return_by_agent(traj_batch.done, reward_by_env)
@@ -604,7 +609,8 @@ def main(config):
         metric["dormancy"] = dormancy_log
         # metric["env-metrics"] = jax.tree_map(lambda x: x.mean(), jax.vmap(env.get_env_metrics)(start_state))
         # metric["mean_lambda_val"] = env_state.rew_lambda.mean()
-        jax.experimental.io_callback(callback, None, metric)
+        
+        
         
         # SAMPLE NEW ENVS
         rng, _rng, _rng2 = jax.random.split(rng, 3)
@@ -625,6 +631,20 @@ def main(config):
         
         obsv = jax.tree_map(lambda x, y: jnp.concatenate([x, y], axis=0), obsv_gen, obsv_sampled)
         env_state = jax.tree_map(lambda x, y: jnp.concatenate([x, y], axis=0), env_state_gen, env_state_sampled)
+        
+        next_levels_batch = jax.tree_map(lambda x, y: jnp.concatenate([x, y], axis=0), new_levels, sampled_env_instances)
+        
+        try:
+            metric["level_stats"] = {
+                "mean_num_conjs": next_levels_batch.num_conjuncts.mean(),
+                "mean_avg_levels": next_levels_batch.avg_levels.mean(),
+            }
+        except AttributeError:
+            metric["level_stats"] = {}
+            # print("Warning: 'next_levels_batch' object does not have .num_conjuncts or .avg_levels")
+        
+        jax.experimental.io_callback(callback, None, metric)
+
         
         start_state = env_state
         
@@ -676,18 +696,18 @@ def main(config):
         # test_metrics["singleton-test-metrics"] = eval_singleton_runner.run(eval_singleton_rng, runner_state[0].params)
         # test_metrics["sampled-test-metrics"] = eval_sampled_runner.run(eval_sampled_rng, runner_state[0].params)
         
-        states, cum_rewards, episode_lengths = jax.vmap(eval, (0, None))(jax.random.split(eval_singleton_rng, config["EVAL_NUM_ATTEMPTS"]), runner_state[0])
+        # states, cum_rewards, episode_lengths = jax.vmap(eval, (0, None))(jax.random.split(eval_singleton_rng, config["EVAL_NUM_ATTEMPTS"]), runner_state[0])
         # Collect Metrics
-        eval_solve_rates = jnp.where(cum_rewards > 0, 1., 0.).mean(axis=0) # (num_eval_levels,)
-        eval_returns = cum_rewards.mean(axis=0) # (num_eval_levels,)
+        # eval_solve_rates = jnp.where(cum_rewards > 0, 1., 0.).mean(axis=0) # (num_eval_levels,)
+        # eval_returns = cum_rewards.mean(axis=0) # (num_eval_levels,)
 
-        log_dict = {}
-        log_dict.update({f"solve_rate/{name}": solve_rate for name, solve_rate in zip(config["EVAL_LEVELS"], eval_solve_rates)})
-        log_dict.update({"solve_rate/mean": eval_solve_rates.mean()})
-        log_dict.update({f"return/{name}": ret for name, ret in zip(config["EVAL_LEVELS"], eval_returns)})
-        log_dict.update({"return/mean": eval_returns.mean()})
+        # log_dict = {}
+        # log_dict.update({f"solve_rate/{name}": solve_rate for name, solve_rate in zip(config["EVAL_LEVELS"], eval_solve_rates)})
+        # log_dict.update({"solve_rate/mean": eval_solve_rates.mean()})
+        # log_dict.update({f"return/{name}": ret for name, ret in zip(config["EVAL_LEVELS"], eval_returns)})
+        # log_dict.update({"return/mean": eval_returns.mean()})
 
-        test_metrics.update(log_dict)
+        # test_metrics.update(log_dict)
 
         runner_state, _ = runner_state_instances
         test_metrics["update_count"] = runner_state[-2]

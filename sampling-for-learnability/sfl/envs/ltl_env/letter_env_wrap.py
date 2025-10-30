@@ -37,6 +37,8 @@ class Level:
     ltl_formula: chex.Array   
     ltl_num_nodes: int
     ltl_root_idx: int
+    num_conjuncts: int
+    avg_levels: int
 
 @struct.dataclass
 class EnvParams:
@@ -87,7 +89,6 @@ class LTLEnv(UnderspecifiedEnv):
         base_env_state = LetterEnvState(
             agent=level.agent_pos,
             map=level.letter_map,
-            time=0,
             num_episodes=0,
             key=key
         )
@@ -258,7 +259,7 @@ def make_level_generator(
         sampled_map = letter_env_state.map
 
         # b. Sample an LTL formula
-        ltl_formula, num_nodes, root_idx = ltl_sampler.sample(key_ltl)
+        ltl_formula, num_nodes, root_idx, num_conjunctions, avg_levels = ltl_sampler.sample(key_ltl)
 
         agent_pos = jnp.array([0, 0], dtype=jnp.int32)
 
@@ -267,7 +268,10 @@ def make_level_generator(
             agent_pos=agent_pos,
             ltl_formula=ltl_formula,
             ltl_num_nodes=num_nodes,
-            ltl_root_idx=root_idx
+            ltl_root_idx=root_idx,
+            num_conjuncts=num_conjunctions,
+            avg_levels=avg_levels
+            
         )
         return level
 
