@@ -455,7 +455,6 @@ class ActorCritic(nn.Module):
     """
     text_embedding_size: int = 32
     output_dim: int = 4
-    value_ensemble_size: int = 1
 
 
     def setup(self):
@@ -472,7 +471,7 @@ class ActorCritic(nn.Module):
         self.gnn = VmappedGNN(
             output_dim=self.text_embedding_size,
             hidden_dim=32,    
-            num_layers=2,     
+            num_layers=8,     
             num_edge_types=4
         )
 
@@ -660,15 +659,20 @@ def main(config):
             "num_env_steps": env_steps,
             "sps": env_steps / stats['time_delta'],
         }
-        
-        # evaluation performance
-        solve_rates = stats['eval_solve_rates']
-        returns     = stats["eval_returns"]
-        log_dict.update({f"solve_rate/{name}": solve_rate for name, solve_rate in zip(config["EVAL_LEVELS"], solve_rates)})
-        log_dict.update({"solve_rate/mean": solve_rates.mean()})
-        log_dict.update({f"return/{name}": ret for name, ret in zip(config["EVAL_LEVELS"], returns)})
-        log_dict.update({"return/mean": returns.mean()})
-        log_dict.update({"eval_ep_lengths/mean": stats['eval_ep_lengths'].mean()})
+        if "mean_num_conjs" in stats:
+            log_dict["level_stats/mean_num_conjs"] = stats["mean_num_conjs"].mean()
+            
+        if "mean_avg_levels" in stats:
+            log_dict["level_stats/mean_avg_levels"] = stats["mean_avg_levels"].mean()
+            
+        # # evaluation performance
+        # solve_rates = stats['eval_solve_rates']
+        # returns     = stats["eval_returns"]
+        # log_dict.update({f"solve_rate/{name}": solve_rate for name, solve_rate in zip(config["EVAL_LEVELS"], solve_rates)})
+        # log_dict.update({"solve_rate/mean": solve_rates.mean()})
+        # log_dict.update({f"return/{name}": ret for name, ret in zip(config["EVAL_LEVELS"], returns)})
+        # log_dict.update({"return/mean": returns.mean()})
+        # log_dict.update({"eval_ep_lengths/mean": stats['eval_ep_lengths'].mean()})
         
         # level sampler
         log_dict.update(train_state_info["log"])
@@ -676,7 +680,7 @@ def main(config):
         # images
         img, enc_str, r_id, n_tokens = stats["highest_scoring_level"]
         # Decode the caption (convert JAX/device arrays to NumPy for the external function)
-        caption_high_score = decode(np.array(enc_str), np.array(r_id), np.array(n_tokens))
+        caption_high_score = decode_array_to_string(np.array(enc_str), np.array(r_id), np.array(n_tokens))
         log_dict.update({"images/highest_scoring_level": wandb.Image(np.array(img), caption=caption_high_score)})
 
         # Repeat for the other single image
@@ -707,11 +711,11 @@ def main(config):
                     wandb_images_with_captions.append(wandb.Image(np.array(img), caption=caption))
                 
                 log_dict.update({f"images/{s}_levels": wandb_images_with_captions})
-        # animations
-        for i, level_name in enumerate(config["EVAL_LEVELS"]):
-            frames, episode_length = stats["eval_animation"][0][:, i], stats["eval_animation"][1][i]
-            frames = np.array(frames[:episode_length])
-            log_dict.update({f"animations/{level_name}": wandb.Video(frames, fps=4)})
+        # # animations
+        # for i, level_name in enumerate(config["EVAL_LEVELS"]):
+        #     frames, episode_length = stats["eval_animation"][0][:, i], stats["eval_animation"][1][i]
+        #     frames = np.array(frames[:episode_length])
+        #     log_dict.update({f"animations/{level_name}": wandb.Video(frames, fps=4)})
         
         wandb.log(log_dict)
     
@@ -825,7 +829,8 @@ def main(config):
             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "mean_num_nodes": new_levels.num_nodes.sum() / config["NUM_ENVS"],
+                "mean_num_conjs": new_levels.num_conjuncts.mean(),
+                "mean_avg_levels": new_levels.avg_levels.mean(),
             }
             
             train_state = train_state.replace(
@@ -881,7 +886,8 @@ def main(config):
                             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "mean_num_nodes": levels.num_nodes.sum() / config["NUM_ENVS"],
+                "mean_num_conjs": levels.num_conjuncts.mean(),
+                "mean_avg_levels": levels.avg_levels.mean(),
             }
             
             train_state = train_state.replace(
@@ -941,7 +947,8 @@ def main(config):
             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "mean_num_nodes": child_levels.num_nodes.sum() / config["NUM_ENVS"],
+                "mean_num_conjs": child_levels.num_conjuncts.mean(),
+                "mean_avg_levels": child_levels.avg_levels.mean(),
             }
             
             train_state = train_state.replace(
@@ -1004,24 +1011,24 @@ def main(config):
         # Train
         (rng, train_state), metrics = jax.lax.scan(train_step, runner_state, None, config["EVAL_FREQ"])
 
-        # Eval
-        rng, rng_eval = jax.random.split(rng)
-        states, cum_rewards, episode_lengths = jax.vmap(eval, (0, None))(jax.random.split(rng_eval, config["EVAL_NUM_ATTEMPTS"]), train_state)
+        # # Eval
+        # rng, rng_eval = jax.random.split(rng)
+        # states, cum_rewards, episode_lengths = jax.vmap(eval, (0, None))(jax.random.split(rng_eval, config["EVAL_NUM_ATTEMPTS"]), train_state)
         
-        # Collect Metrics
-        eval_solve_rates = jnp.where(cum_rewards > 0, 1., 0.).mean(axis=0) # (num_eval_levels,)
-        eval_returns = cum_rewards.mean(axis=0) # (num_eval_levels,)
+        # # Collect Metrics
+        # eval_solve_rates = jnp.where(cum_rewards > 0, 1., 0.).mean(axis=0) # (num_eval_levels,)
+        # eval_returns = cum_rewards.mean(axis=0) # (num_eval_levels,)
         
-        # just grab the first run
-        states, episode_lengths = jax.tree_map(lambda x: x[0], (states, episode_lengths)) # (num_steps, num_eval_levels, ...), (num_eval_levels,)
-        images, _ , _, _ = jax.vmap(jax.vmap(env_renderer.render_state, (0, None)), (0, None))(states, env_params) # (num_steps, num_eval_levels, ...)
-        frames= images.transpose(0, 1, 4, 2, 3) # WandB expects color channel before image dimensions when dealing with animations for some reason
+        # # just grab the first run
+        # states, episode_lengths = jax.tree_map(lambda x: x[0], (states, episode_lengths)) # (num_steps, num_eval_levels, ...), (num_eval_levels,)
+        # images, _ , _, _ = jax.vmap(jax.vmap(env_renderer.render_state, (0, None)), (0, None))(states, env_params) # (num_steps, num_eval_levels, ...)
+        # frames= images.transpose(0, 1, 4, 2, 3) # WandB expects color channel before image dimensions when dealing with animations for some reason
         
         metrics["update_count"] = train_state.num_dr_updates + train_state.num_replay_updates + train_state.num_mutation_updates
-        metrics["eval_returns"] = eval_returns
-        metrics["eval_solve_rates"] = eval_solve_rates
-        metrics["eval_ep_lengths"]  = episode_lengths
-        metrics["eval_animation"] = (frames, episode_lengths)
+        # metrics["eval_returns"] = eval_returns
+        # metrics["eval_solve_rates"] = eval_solve_rates
+        # metrics["eval_ep_lengths"]  = episode_lengths
+        # metrics["eval_animation"] = (frames, episode_lengths)
         metrics["dr_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.dr_last_level_batch, env_params)
         metrics["replay_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.replay_last_level_batch, env_params)
         metrics["mutation_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.mutation_last_level_batch, env_params)

@@ -34,13 +34,14 @@ class Level:
     """
     letter_map: chex.Array           # The letter grid [grid_size, grid_size, num_unique_letters]
     agent_pos: chex.Array     # Initial agent position (e.g., jnp.array([0, 0]))
-    ltl_formula: chex.Array   # The LTL AST array (from an external sampler)
+    ltl_formula: chex.Array   
     ltl_num_nodes: int
     ltl_root_idx: int
+    num_conjuncts: int
+    avg_levels: int
 
 @struct.dataclass
 class EnvParams:
-    """UED-style episode parameters."""
     max_steps_in_episode: int = 100
     min_conjunctions: int = 1
     max_conjunctions: int = 3
@@ -54,25 +55,17 @@ class EnvState(PyTreeNode):
     key: jnp.ndarray            # PRNG key
     num_nodes: jnp.ndarray
     root_idx: jnp.ndarray
-    terminal: bool              # <-- ADDED: True if LTL goal is True/False
+    terminal: bool              
 
-class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
-    """
-    Functional wrapper adding LTL goals to a Gymnax environment,
-    adapted for Unsupervised Environment Design (UED).
-    
-    This environment expects to be reset with an `Level` object.
-    """
-    def __init__(self, grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=False, timeout=100, num_unique_letters=len(set(encode_letters("abcdefghijkl"))), intrinsic: float = 0.0):
+class LTLEnv(UnderspecifiedEnv): 
+    def __init__(self, grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=False, num_unique_letters=len(set(encode_letters("abcdefghijkl"))), intrinsic: float = 0.0):
         super().__init__()
         
-        # Store the configuration for the underlying LetterEnv
         self.config_params = dict(
             grid_size=grid_size, 
             letters=encode_letters(letters),
             use_fixed_map=use_fixed_map,
             use_agent_centric_view=use_agent_centric_view,
-            timeout=timeout, # This is now only used by LetterEnv if needed, not for termination
             num_unique_letters=len(set(encode_letters(letters)))
         )
         
@@ -84,7 +77,6 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
         
     @property
     def default_params(self) -> EnvParams:
-        """Return default UED-style episode parameters."""
         return EnvParams()
 
     def init_state_from_level(
@@ -94,16 +86,13 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
     ) -> EnvState:
         """Helper to create the initial state from a level definition."""
         
-        # 1. Create the base LetterEnv state from the level
         base_env_state = LetterEnvState(
             agent=level.agent_pos,
             map=level.letter_map,
-            time=0,
             num_episodes=0,
             key=key
         )
         
-        # 2. Create the full EnvState
         ltl_state = EnvState(
             env_state=base_env_state,
             ltl_goal=level.ltl_formula,
@@ -115,7 +104,6 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
         )
         return ltl_state
 
-    # --- UED API Implementation ---
 
     def reset_env_to_level(
         self, 
@@ -140,22 +128,19 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
         
         key, subkey = jax.random.split(key)
         
-        # 1. Step the underlying LetterEnv
-        #    Note: LetterEnv.step_env MUST be modified to not return done=True on timeout
+  
         obs, new_env_state, reward, base_done, info = self.env.step_env(
             subkey, state.env_state, action
         )
 
-        # 2. Progress LTL
         truth_assignment = jax.lax.stop_gradient(self.get_events(new_env_state))
         ltl_goal, root_index, num_nodes = progress.progress_and_clean_jax(
             state.ltl_goal, truth_assignment, 0, state.num_nodes
         )
 
-        # 3. Compute LTL reward and termination
         is_true = (ltl_goal[0][0] == LTL_BASE_VOCAB['True'])
         is_false = (ltl_goal[0][0] == LTL_BASE_VOCAB['False'])
-        ltl_terminal = jnp.logical_or(is_true, is_false) # This is the new terminal flag
+        ltl_terminal = jnp.logical_or(is_true, is_false) 
 
         ltl_reward = jax.lax.cond(
             is_true,
@@ -167,7 +152,6 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
             )
         )
         
-        # 4. Create new state
         new_state = EnvState(
             env_state=new_env_state,
             ltl_goal=ltl_goal,
@@ -178,7 +162,7 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
             terminal=ltl_terminal 
         )
         
-        # 5. Get obs and check for termination using UED method
+   
         ltl_obs = self.get_obs(new_state)
         done = self.is_terminal(new_state, params) 
         
@@ -222,9 +206,15 @@ class LTLEnv(UnderspecifiedEnv): # <-- CHANGED: Inherit from UED base
         return dict(num_nodes_left=state.num_nodes)
    
 def make_level_generator(
-    grid_size=5, 
-    letters="abcdefghijkl", 
+    sampler,
+    min_levels, 
+    max_levels, 
+    min_conjunctions, 
+    max_conjunctions,
+    grid_size=7, 
+    letters="aabbccddeeffgghhiijjkkll", 
     use_fixed_map=False, 
+    
 ):
     """
     Creates a level generator function for the LTLEnv.
@@ -242,7 +232,6 @@ def make_level_generator(
         letters=encoded_letters,
         use_fixed_map=use_fixed_map,
         use_agent_centric_view=True, 
-        timeout=100,                  # Not relevant for level generation
         num_unique_letters=num_unique_letters
     )
 
@@ -252,7 +241,10 @@ def make_level_generator(
 
     # 3. Instantiate the LTL sampler
     propositions = map_sampler_env.get_propositions()
-    ltl_sampler = JaxUntilTaskSampler(propositions)
+    if sampler == "avoidance":
+        ltl_sampler = JaxUntilTaskSampler(propositions,min_levels=min_levels, max_levels=max_levels, min_conjunctions=min_conjunctions, max_conjunctions=max_conjunctions)
+    elif sampler == "partially_ordered":
+        ltl_sampler = JaxEventuallySampler(propositions,min_levels=min_levels, max_levels=max_levels, min_conjunctions=min_conjunctions, max_conjunctions=max_conjunctions)
 
     @jax.jit
     def sample(key: chex.PRNGKey) -> Level:
@@ -267,7 +259,7 @@ def make_level_generator(
         sampled_map = letter_env_state.map
 
         # b. Sample an LTL formula
-        ltl_formula, num_nodes, root_idx = ltl_sampler.sample(key_ltl)
+        ltl_formula, num_nodes, root_idx, num_conjunctions, avg_levels = ltl_sampler.sample(key_ltl)
 
         agent_pos = jnp.array([0, 0], dtype=jnp.int32)
 
@@ -276,7 +268,10 @@ def make_level_generator(
             agent_pos=agent_pos,
             ltl_formula=ltl_formula,
             ltl_num_nodes=num_nodes,
-            ltl_root_idx=root_idx
+            ltl_root_idx=root_idx,
+            num_conjuncts=num_conjunctions,
+            avg_levels=avg_levels
+            
         )
         return level
 
@@ -356,7 +351,6 @@ def make_level_mutator_minimax(max_num_edits: int) -> Callable[[chex.PRNGKey, Le
         )
         
         # --- 4. Return new Level ---
-        # We use .replace() as Level is a flax struct (PyTreeNode)
         return level.replace(
             letter_map=mutated_letter_map,
             ltl_formula=mutated_formula
