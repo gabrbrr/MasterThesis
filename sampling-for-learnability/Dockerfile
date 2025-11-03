@@ -23,13 +23,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 
-# Install the CPU-only version of JAX, respecting version cap
-# We use --no-cache-dir to keep the image slim
-# Pinning to 0.4.23 to solve dependency issues between jax and flax:
-# - jax >= 0.4.24 removed `define_bool_state`, which flax 0.7.5 needs.
-# - flax > 0.7.5 needs jax features not in <= 0.4.38.
-# jax 0.4.23 and flax 0.7.5 is a known compatible set.
-RUN pip install --no-cache-dir -U "jax[cpu]==0.4.23" "jaxlib==0.4.23" "flax==0.7.5"
+RUN pip install --no-cache-dir -U "jax[cpu]==0.4.17" "jaxlib==0.4.17" "flax==0.7.5"
 
 # Install other direct dependencies
 # This ensures they are present before your local package is installed.

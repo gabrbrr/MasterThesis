@@ -30,6 +30,7 @@ ID         = $(shell id -u)
 
 build:
 	DOCKER_BUILDKIT=1 docker build \
+        --no-cache \
 		--build-arg USE_CUDA=$(USE_CUDA) \
 		--build-arg MYUSER=$(MYUSER) \
 		--build-arg UID=$(ID) \
@@ -37,6 +38,7 @@ build:
 		--progress=plain ${PWD}/.
 
 run:
+    #rm -r .local
 	$(DOCKER_RUN) /bin/bash
 
 test:
