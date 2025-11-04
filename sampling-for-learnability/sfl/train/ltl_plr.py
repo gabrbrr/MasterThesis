@@ -23,7 +23,6 @@ import hydra
 from omegaconf import OmegaConf
 from typing import Callable, Any
 from jaxued.environments.underspecified_env import EnvParams, EnvState, Observation, UnderspecifiedEnv
-
 from sfl.envs.ltl_env.letter_env_wrap import Level, make_level_generator, LTLEnv, make_level_mutator_minimax
 from sfl.envs.ltl_env.renderer import LTLEnvRenderer
 from jaxued.level_sampler import LevelSampler
@@ -627,6 +626,9 @@ def main(config):
         else:
             d[k] = v
     config = d
+
+    sampler_args=config["level_generators"]["SIMPLE_AVOIDANCE"]
+
     config["TOTAL_TIMESTEPS"] = int(config["TOTAL_TIMESTEPS"])
 
     config["NUM_UPDATES"] = (
@@ -721,12 +723,12 @@ def main(config):
     
     # Setup the environment
 
-    env = LTLEnv(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=True, timeout=100, num_unique_letters=len(set("aabbccddeeffgghhiijjkkll")), intrinsic= 0.0)
+    env = LTLEnv(**config["env"])
     eval_env = env
-    sample_random_level = make_level_generator(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False )
+    env_params=env.default_params
+    sample_random_level = make_level_generator(**sampler_args, **config["env"] )
     env_renderer = LTLEnvRenderer(env, tile_size=8)
     env = AutoReplayWrapper(env)
-    env_params = env.default_params
     mutate_level = make_level_mutator_minimax(2)
 
     # And the level sampler    
@@ -765,7 +767,7 @@ def main(config):
         sampler = level_sampler.initialize(pholder_level, {"max_return": -jnp.inf})
         pholder_level_batch = jax.tree_map(lambda x: jnp.array([x]).repeat(config["NUM_ENVS"], axis=0), pholder_level)
         return TrainState.create(
-            apply_fn=  jax.vmap(network.apply, in_axes=(None, 0)),
+            apply_fn= network.apply,
             params=network_params,
             tx=tx,
             sampler=sampler,

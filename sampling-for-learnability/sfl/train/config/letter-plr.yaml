@@ -1,5 +1,5 @@
 defaults:
-  - env: minigrid
+  - env: letter
   - learning: ippo-letter
   - ued: plr
   - _self_

@@ -82,3 +82,187 @@ python3 sfl/train/ltl_sfl.py
 init_env_stateexit
 rxit
 exit
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+exit
+export JAX_LOG_COMPILES=1
+python3 ltlbootcamp.py
+exit
+export JAX_LOG_COMPILES=1
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+EXIT
+exit
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+exit
+exit
+python3 ltlbootcamp.py
+rm -r checkpoints/LTLBootCamp
+rm -r checkpoints
+python3 ltlbootcamp.py
+rm -r checkpoints
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+pip install --upgrade jax orbax-checkpoint
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+docker ls
+docker ps
+docker ls 
+docker container 
+docker images
+exit
+python3 ltlbootcamp.py
+docker images
+exit
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+exit
+python3 -c "import jax; print('--- JAX location ---'); print(jax.__file__)"
+"import flax; print('--- FLAX location ---'); print(flax.__file__)"
+exit
+"import flax; print('--- FLAX location ---'); print(flax.__file__)"
+python3 -c "import jax; print('--- JAX location ---'); print(jax.__file__)"
+python3 ltlbootcamp.py
+pip install rlax
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+pip install orbax-checkpoint
+pip --upgrade orbax-checkpoint
+pip install --upgrade orbax-checkpoint
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+pip install rlax
+python3 ltlbootcamp.py
+pip install --upgrade orbax-checkpoint
+unset XLA_FLAGS
+pip uninstall jaxmarl
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+pip install rlax
+python3 ltlbootcamp.py
+pip install --upgrade "jax<=0.4.38" "scipy<=1.12" "orbax-checkpoint<0.5.0"
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+pip install rlax
+python3 ltlbootcamp.py
+import jax
+print(jax.__version__)
+pip show jax
+pip install jaxlib==0.4.17
+python3 ltlbootcamp.py
+pip install jax==0.4.17
+python3 ltlbootcamp.py
+pip install orbax-checkpoint==0.5.3
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+exit
+ls
+cd sfl
+ls
+cd train
+ls
+python3 ltl_sfl.py
+exit
+python3 ltl_sfl.py
+cd sfl
+cd train
+python3 ltl_sfl.py
+exit
+cd sfl
+cd train
+python3 ltl_sfl.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+exit
+ls
+cd sfl
+cd train
+ls
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+exit
+ls
+cd dfl
+ls
+cd sfl
+ls
+cd train
+ls
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+export [200~XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+python3 ltl_sfl.py
+python3 minigrid_sfl.py
+exit
+python3 minigrid_sfl.py
+cd sfl
+cd train
+python3 minigrid_sfl.py
+pip install --upgrade flax
+exit
+pip install [200~flax==0.7.4~
+pip install flax==0.7.4
+cd sfl
+cd train
+python3 minigrid_sfl.py
+pip instal flax==0.7.2
+pip install flax==0.7.2
+python3 minigrid_sfl.py
+pip install flax==0.7.5
+python3 minigrid_sfl.py
+python3 minigrid_sfl.py
+python3 ltl_sfl.py
+exit

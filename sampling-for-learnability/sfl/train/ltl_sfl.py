@@ -77,12 +77,12 @@ def main(config):
     )
         
     rng = jax.random.PRNGKey(config["SEED"])
-    
+    print(config["learning"]["NUM_ENVS_FROM_SAMPLED"],config["learning"]["NUM_ENVS_TO_GENERATE"])
     assert (config["learning"]["NUM_ENVS_FROM_SAMPLED"] +  config["learning"]["NUM_ENVS_TO_GENERATE"]) == config["learning"]["NUM_ENVS"]
     
-    env = LTLEnv(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=True, timeout=100, num_unique_letters=len(set("aabbccddeeffgghhiijjkkll")), intrinsic = 0.0)
+    env = LTLEnv(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=True)
     eval_env = env
-    sample_random_level = make_level_generator(**config["level_generators"]["SIMPLE_AVOIDANCE"])
+    sample_random_level = make_level_generator(**config["env"]["level_generators"]["SIMPLE_AVOIDANCE"])
     env_renderer = LTLEnvRenderer(env, tile_size=8)
     env = AutoReplayWrapper(env)
     t_config = config["learning"]
@@ -643,7 +643,7 @@ def main(config):
             metric["level_stats"] = {}
             # print("Warning: 'next_levels_batch' object does not have .num_conjuncts or .avg_levels")
         
-        jax.experimental.io_callback(callback, None, metric)
+        #jax.experimental.io_callback(callback, None, metric)
 
         
         start_state = env_state
@@ -653,7 +653,7 @@ def main(config):
         return (runner_state, instances), metric
     
     def log_buffer(learnability, states, epoch):
-        num_samples = states.env_state.agent_pos.shape[0]
+        num_samples = states.env_state.env_state.agent.shape[0]
         rows = 2 
         fig, axes = plt.subplots(rows, int(num_samples/rows), figsize=(20, 10))
         axes=axes.flatten()
@@ -674,9 +674,10 @@ def main(config):
                         
         plt.tight_layout()
         fig.canvas.draw()
-        im = Image.frombytes('RGB', fig.canvas.get_width_height(), fig.canvas.tostring_rgb()) 
-        wandb.log({"maps": wandb.Image(im)}, step=epoch)
-    
+        renderer = fig.canvas.get_renderer()
+        im = Image.frombytes('RGB', fig.canvas.get_width_height(), renderer.buffer_rgba()) 
+        plt.close(fig)
+        return wandb.Image(im)
     @jax.jit
     def train_and_eval_step(runner_state, eval_rng):
         
@@ -684,7 +685,7 @@ def main(config):
         # TRAIN
         learnabilty_scores, instances = get_learnability_set(learnability_rng, runner_state[0].params)
         runner_state_instances = (runner_state, instances)
-        runner_state_instances, metrics = jax.lax.scan(train_step, runner_state_instances, None, t_config["EVAL_FREQ"])
+        runner_state_instances, train_metrics_stack = jax.lax.scan(train_step, runner_state_instances, None, t_config["EVAL_FREQ"])
         # EVAL
         
         test_metrics = {
@@ -716,7 +717,7 @@ def main(config):
         _rng = jax.random.split(_rng, 20)
         _, top_states = jax.vmap(env.reset_to_level)(_rng, top_instances)
         
-        return runner_state, (learnabilty_scores.at[-20:].get(), top_states), test_metrics
+        return runner_state, (learnabilty_scores.at[-20:].get(), top_states), train_metrics_stack, test_metrics
     
     rng, _rng = jax.random.split(rng)
     runner_state = (
@@ -733,9 +734,18 @@ def main(config):
     for eval_step in range(int(t_config["NUM_UPDATES"] // t_config["EVAL_FREQ"])):
         start_time = time.time()
         rng, eval_rng = jax.random.split(rng)
-        runner_state, instances, metrics = train_and_eval_step(runner_state, eval_rng)
+        runner_state, instances, train_metrics_stack, metrics = train_and_eval_step(runner_state, eval_rng)
+        jax.block_until_ready(runner_state)
         curr_time = time.time()
-        log_buffer(*instances, metrics["update_count"])
+        map_image=log_buffer(*instances, metrics["update_count"])
+        metrics["maps"] = map_image
+        current_update = metrics["update_count"]
+        start_update = current_update - t_config["EVAL_FREQ"]
+        for i in range(t_config["EVAL_FREQ"]):
+            # Get the metric for step `i` from the stack
+            step_metric = jax.tree_map(lambda x: x[i], train_metrics_stack)
+            # Log it at the correct, individual step number
+            wandb.log(step_metric, step=(start_update + i))
         metrics['time_delta'] = curr_time - start_time
         metrics["steps_per_section"] = (t_config["EVAL_FREQ"] * t_config["NUM_STEPS"] * t_config["NUM_ENVS"]) / metrics['time_delta']
         wandb.log(metrics, step=metrics["update_count"])

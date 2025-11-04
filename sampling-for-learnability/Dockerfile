@@ -23,7 +23,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 
-RUN pip install --no-cache-dir -U "jax[cpu]==0.4.17" "jaxlib==0.4.17" "flax==0.7.5"
+RUN pip install --no-cache-dir -U "jax[cpu]==0.4.17" "jaxlib==0.4.17" 
 
 # Install other direct dependencies
 # This ensures they are present before your local package is installed.
@@ -79,6 +79,11 @@ USER ${MYUSER}
 
 #disabling preallocation (still useful for CPU)
 ENV XLA_PYTHON_CLIENT_PREALLOCATE=false
+#safety measures
+ENV XLA_PYTHON_CLIENT_MEM_FRACTION=0.25 
+ENV TF_FORCE_GPU_ALLOW_GROWTH=true
+
+ENV JAX_LOG_COMPILES=1
 
 # Add this to log JAX compilations.
 # This helps confirm the program is compiling, not hanging.

@@ -136,12 +136,9 @@ class JaxASTBuilder:
         ])
 
 
-    @partial(jax.jit, static_argnums=0)
     def __call__(self, encoded_array: jnp.ndarray, num_nodes: int):
         """
         Processes an encoded formula array to produce a padded graph representation
         that is compatible with jax.ops.segment_sum.
         """
-        # The __call__ can't be jitted with self, as it would recompile for every instance.
-        # The performance comes from jitting the static _build_graph_static method.
         return JaxASTBuilder._build_graph_static(encoded_array, num_nodes,max_formula_nodes=self.max_formula_nodes,max_graph_nodes=self.max_graph_nodes,vocab_size=VOCAB_SIZE)

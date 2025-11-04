@@ -1,25 +1,26 @@
 env_name: "Letter"
 "EVAL_NUM_ATTEMPTS": 5
+env:
+  max_steps_in_episode: 75
+  grid_size: 7
+  letters: "aabbccddeeffgghhiijjkkll"
+  use_fixed_map: false
+  use_agent_centric_view: true
+
 level_generators:
   SIMPLE_AVOIDANCE:
-    sampler_class: "avoidance"
+    sampler: "avoidance" 
     min_levels: 1
     max_levels: 3
     min_conjunctions: 1
     max_conjunctions: 2
-    grid_size: 7
-    letters: "aabbccddeeffgghhiijjkkll"
-    use_fixed_map: false
 
   COMPLEX_AVOIDANCE:
-    sampler_class: "avoidance"
+    sampler: "avoidance"
     min_levels: 3
     max_levels: 6
     min_conjunctions: 2
     max_conjunctions: 3
-    grid_size: 7
-    letters: "aabbccddeeffgghhiijjkkll"
-    use_fixed_map: false
   
   SIMPLE_PO:
     sampler_class: "partially_ordered"
@@ -27,9 +28,6 @@ level_generators:
     max_levels: 5
     min_conjunctions: 1
     max_conjunctions: 4
-    grid_size: 7
-    letters: "aabbccddeeffgghhiijjkkll"
-    use_fixed_map: false
 
   COMPLEX_PO:
     sampler_class: "partially_ordered"
@@ -37,6 +35,4 @@ level_generators:
     max_levels: 15
     min_conjunctions: 4
     max_conjunctions: 12
-    grid_size: 7
-    letters: "aabbccddeeffgghhiijjkkll"
-    use_fixed_map: false
+    

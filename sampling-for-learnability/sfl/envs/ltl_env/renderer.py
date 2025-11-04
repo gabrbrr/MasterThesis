@@ -109,8 +109,8 @@ class LTLEnvRenderer:
         self.tile_size = tile_size
         
         # Extract key parameters from the env config
-        self.grid_size = self.env.config_params['grid_size']
-        self.num_unique_letters = self.env.config_params['num_unique_letters']
+        self.grid_size = self.env.grid_size
+        self.num_unique_letters = len(set(self.env.letters_str))
         
         # Create the atlas and store it as a jax array
         self._atlas = jnp.array(
@@ -133,7 +133,7 @@ class LTLEnvRenderer:
         return (self._render_grid(
             env_state.env_state.map, 
             env_state.env_state.agent
-        ),env_state.ltl_goal,env_state.root_idx,env_state.num_valid_nodes)
+        ),env_state.ltl_goal,env_state.root_idx,env_state.num_nodes)
 
     @partial(jax.jit, static_argnums=(0,))
     def _render_grid(self, letter_map: chex.Array, agent_pos: chex.Array) -> chex.Array:

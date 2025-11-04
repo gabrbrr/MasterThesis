@@ -42,11 +42,7 @@ class Level:
 
 @struct.dataclass
 class EnvParams:
-    max_steps_in_episode: int = 100
-    min_conjunctions: int = 1
-    max_conjunctions: int = 3
-    min_disjunctions: int = 1
-    max_disjunctions: int = 3
+    max_steps_in_episode: int = 75
 
 class EnvState(PyTreeNode):
     env_state: LetterEnvState   # Underlying LetterEnv state
@@ -58,21 +54,31 @@ class EnvState(PyTreeNode):
     terminal: bool              
 
 class LTLEnv(UnderspecifiedEnv): 
-    def __init__(self, grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=False, num_unique_letters=len(set(encode_letters("abcdefghijkl"))), intrinsic: float = 0.0):
+    def __init__(self, 
+                 grid_size=7, 
+                 letters="aabbccddeeffgghhiijjkkll", 
+                 use_fixed_map=False, 
+                 use_agent_centric_view=True, 
+                 intrinsic: float = 0.0,
+                 max_steps_in_episode: int = 75):
         super().__init__()
         
-        self.config_params = dict(
-            grid_size=grid_size, 
-            letters=encode_letters(letters),
-            use_fixed_map=use_fixed_map,
-            use_agent_centric_view=use_agent_centric_view,
-            num_unique_letters=len(set(encode_letters(letters)))
-        )
-        
-        self.env = LetterEnv(self.config_params)
-        self.propositions = self.env.get_propositions()
+        self.grid_size = grid_size
+        self.letters_str = letters 
+        self.use_fixed_map = use_fixed_map
+        self.use_agent_centric_view = use_agent_centric_view
         self.intrinsic = intrinsic
-        self.ast_builder = JaxASTBuilder(LTL_BASE_VOCAB, MAX_NODES)
+        
+        # Pass the static config down to the base LetterEnv
+        self.env = LetterEnv(
+            grid_size=self.grid_size,
+            letters=self.letters_str,
+            use_fixed_map=self.use_fixed_map,
+            use_agent_centric_view=self.use_agent_centric_view,
+            max_steps_in_episode=max_steps_in_episode 
+        )
+        self.propositions = self.env.get_propositions()
+        self.ast_builder = JaxASTBuilder(VOCAB_SIZE, MAX_NODES)
         
         
     @property
@@ -90,6 +96,7 @@ class LTLEnv(UnderspecifiedEnv):
             agent=level.agent_pos,
             map=level.letter_map,
             num_episodes=0,
+            time=0,
             key=key
         )
         
@@ -105,7 +112,7 @@ class LTLEnv(UnderspecifiedEnv):
         return ltl_state
 
 
-    def reset_env_to_level(
+    def reset_to_level(
         self, 
         rng: chex.PRNGKey, 
         level: Level, 
@@ -211,35 +218,27 @@ def make_level_generator(
     max_levels, 
     min_conjunctions, 
     max_conjunctions,
-    grid_size=7, 
-    letters="aabbccddeeffgghhiijjkkll", 
-    use_fixed_map=False, 
-    
-):
+    # Accept static config as keyword args
+    grid_size=7,
+    letters="aabbccddeeffgghhiijjkkll",
+    use_fixed_map=False,
+    use_agent_centric_view=True,
+    max_steps_in_episode=100
+    ):
     """
     Creates a level generator function for the LTLEnv.
-
-    This factory initializes the map sampler (LetterEnv) and the LTL sampler
-    and returns a JIT-compiled function to sample levels.
     """
 
-    # 1. Create the config for the base environment
-    encoded_letters = encode_letters(letters)
-    num_unique_letters = len(set(encoded_letters))
-
-    config_params = dict(
+    # 1. Instantiate the map sampler (the base LetterEnv)
+    #    using the provided static config.
+    map_sampler_env = LetterEnv(
         grid_size=grid_size,
-        letters=encoded_letters,
+        letters=letters,
         use_fixed_map=use_fixed_map,
-        use_agent_centric_view=True, 
-        num_unique_letters=num_unique_letters
+        use_agent_centric_view=use_agent_centric_view,
+        max_steps_in_episode=max_steps_in_episode
     )
 
-    # 2. Instantiate the map sampler (the base LetterEnv)
-    # We use this to call its reset_env method, which samples a valid map
-    map_sampler_env = LetterEnv(config_params)
-
-    # 3. Instantiate the LTL sampler
     propositions = map_sampler_env.get_propositions()
     if sampler == "avoidance":
         ltl_sampler = JaxUntilTaskSampler(propositions,min_levels=min_levels, max_levels=max_levels, min_conjunctions=min_conjunctions, max_conjunctions=max_conjunctions)
@@ -275,7 +274,6 @@ def make_level_generator(
         )
         return level
 
-    # Return the pure sample function
     return sample
 
 
