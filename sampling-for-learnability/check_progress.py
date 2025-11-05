@@ -6,6 +6,296 @@ import logging
 import random
 
 
+def simplify_until(formula):
+    """
+    Recursively simplifies an LTL formula tuple.
+    Applies associativity and idempotency for 'and'/'or'.
+    - Flattens nested 'and'/'or' operators.
+    - Removes duplicates (Idempotency: A | A = A).
+    - Rebuilds as a left-associative chain (order is not guaranteed).
+    """
+    # Base case: Proposition (string)
+    if not isinstance(formula, tuple):
+        return formula
+    
+    op = formula[0]
+    
+    # 1. Recursively simplify all operands first
+    operands = [simplify(opnd) for opnd in formula[1:]]
+    
+    if op in ('and', 'or'):
+        # --- 2. Associativity Step: Flatten ---
+        # Collect all operands from nested structures of the *same* operator
+        flattened_ops = []
+        for opnd in operands:
+            if isinstance(opnd, tuple) and opnd[0] == op:
+                # ...add its operands (which are already simplified) to the list.
+                flattened_ops.extend(opnd[1:])
+            else:
+                # ...otherwise, just add the operand itself.
+                flattened_ops.append(opnd)
+        
+        # --- 3. Idempotency Step: Remove Duplicates ---
+        # Since the tuples/strings used in the formula are hashable, 
+        # using set() is a fast way to remove all duplicates.
+        unique_ops = list(set(flattened_ops))
+        
+        # --- 4. Rebuild as a left-associative chain ---
+        # The order from list(set(...)) is arbitrary.
+        # This is fine, as canonical_form() will sort it later.
+        
+        if not unique_ops:
+            # An empty 'and' is True, an empty 'or' is False
+            return 'True' if op == 'and' else 'False'
+        
+        # Build the chain from the arbitrarily ordered unique list
+        result = unique_ops[0]
+        for i in range(1, len(unique_ops)):
+            result = (op, result, unique_ops[i])
+            
+        return result
+
+    elif op in ('not', 'eventually', 'always', 'next'):
+        # Unary operators
+        return (op, operands[0])
+    
+    elif op == 'until':
+        # Binary, non-commutative
+        return (op, operands[0], operands[1])
+    
+    else:
+        # Unknown operator
+        return (op,) + tuple(operands)
+
+
+def simplify(formula):
+
+    """
+
+    Recursively simplifies an LTL formula tuple.
+
+    Applies associativity and idempotency for 'and'/'or'.
+
+    - Flattens nested 'and'/'or' operators.
+
+    - Removes duplicates (Idempotency: A | A = A).
+
+    - Applies Annihilation (A & False = False, A | True = True).
+
+    - Applies Identity (A & True = A, A | False = A).
+
+    - Rebuilds as a left-associative chain (order is not guaranteed).
+
+    """
+
+    # Base case: Proposition (string)
+
+    if not isinstance(formula, tuple):
+
+        return formula
+
+    
+
+    op = formula[0]
+
+    
+
+    # 1. Recursively simplify all operands first
+
+    operands = [simplify(opnd) for opnd in formula[1:]]
+
+    
+
+    if op in ('and', 'or'):
+
+        # --- 2. Associativity Step: Flatten ---
+
+        # Collect all operands from nested structures of the *same* operator
+
+        flattened_ops = []
+
+        for opnd in operands:
+
+            if isinstance(opnd, tuple) and opnd[0] == op:
+
+                # ...add its operands (which are already simplified) to the list.
+
+                flattened_ops.extend(opnd[1:])
+
+            else:
+
+                # ...otherwise, just add the operand itself.
+
+                flattened_ops.append(opnd)
+
+        
+
+        # --- 3. Idempotency Step: Get unique operands ---
+
+        # Using set() is a fast way to remove all duplicates (A | A = A).
+
+        unique_ops = set(flattened_ops)
+
+        
+
+        # --- 4. Annihilation & Identity Rules ---
+
+        
+
+        if op == 'and':
+
+            # Annihilation: (A & False) = False
+
+            if 'False' in unique_ops:
+
+                return 'False'
+
+            # Identity: Remove 'True' (A & True = A)
+
+            unique_ops.discard('True')
+        
+
+        elif op == 'or':
+
+            # Annihilation: (A | True) = True
+
+            if 'True' in unique_ops:
+
+                return 'True'
+
+            # Identity: Remove 'False' (A | False = A)
+
+            unique_ops.discard('False')
+
+        
+
+        # --- 5. Rebuild as a left-associative chain ---
+
+        
+
+        # Convert set back to list for building
+
+        final_ops = list(unique_ops)
+
+        
+
+        if not final_ops:
+
+            # If the list is empty, it's the identity element.
+
+            # e.g., (A & True) -> unique_ops={'A', 'True'} -> final_ops=['A']
+
+            # e.g., (True & True) -> unique_ops={'True'} -> final_ops=[]
+
+            # An empty 'and' is 'True'. An empty 'or' is 'False'.
+
+            return 'True' if op == 'and' else 'False'
+
+        
+
+        # Build the chain from the filtered, unique list
+
+        # Note: The order from list(set(...)) is arbitrary.
+
+        # This is fine, as canonical_form() will sort it later.
+
+        result = final_ops[0]
+
+        for i in range(1, len(final_ops)):
+
+            result = (op, result, final_ops[i])
+
+            
+
+        return result
+
+
+
+    elif op in ('not', 'eventually', 'always', 'next'):
+
+        # Unary operators
+
+        return (op, operands[0])
+
+    
+
+    elif op == 'until':
+
+        # Binary, non-commutative
+
+        return (op, operands[0], operands[1])
+    else:
+
+        # Unknown operator
+        return (op,) + tuple(operands)
+
+
+
+def canonical_form(formula):
+    """
+    Recursively converts an LTL formula tuple into a canonical form.
+    Applies commutativity AND associativity for 'and'/'or'.
+    - Flattens nested 'and'/'or' operators.
+    - Sorts operands.
+    - Rebuilds as a left-associative chain.
+    """
+    # Base case: Proposition (string)
+    if not isinstance(formula, tuple):
+        return formula
+    
+    op = formula[0]
+    operands = formula[1:]
+    
+    # Recursively canonicalize all operands first
+    canonical_operands = [canonical_form(opnd) for opnd in operands]
+    
+    if op in ('and', 'or'):
+        # --- Associativity Step: Flatten (FIXED) ---
+        # This now handles arbitrarily deep nesting, e.g., (A | (B | (C | D)))
+        flattened_ops = []
+        queue = list(canonical_operands) # Start with the immediate operands
+
+        while queue:
+            opnd = queue.pop(0) # Get the next item to check
+            
+            if isinstance(opnd, tuple) and opnd[0] == op:
+                # It's a nested op of the same type.
+                # Add its children to the queue to be processed.
+                queue.extend(opnd[1:])
+            else:
+                # It's a base case (a different op, a str, etc.)
+                # Add it to our final flat list.
+                flattened_ops.append(opnd)
+        
+        # --- Commutativity Step: Sort ---
+        def sort_key(item):
+            # Sort by type (str vs tuple) first, then by string representation
+            is_tuple = isinstance(item, tuple)
+            return (is_tuple, str(item))
+        
+        sorted_ops = sorted(flattened_ops, key=sort_key)
+        
+        # --- Rebuild as a left-associative chain ---
+        if not sorted_ops:
+            return 'True' if op == 'and' else 'False'
+        
+        result = sorted_ops[0]
+        for i in range(1, len(sorted_ops)):
+            result = (op, result, sorted_ops[i])
+            
+        return result
+
+    elif op in ('not', 'eventually', 'always', 'next'):
+        # Unary operators
+        return (op, canonical_operands[0])
+    
+    elif op == 'until':
+        # Binary, non-commutative
+        return (op, canonical_operands[0], canonical_operands[1])
+    
+    else:
+        # Unknown operator
+        return (op,) + tuple(canonical_operands)
 
 def progress_and_clean(ltl_formula, truth_assignment):
     ltl = progress(ltl_formula, truth_assignment)
@@ -114,10 +404,9 @@ def progress(ltl_formula, truth_assignment):
     if ltl_formula[0] == 'next':
         return progress(ltl_formula[1], truth_assignment)
 
-    # NOTE: What about release and other temporal operators?
     if ltl_formula[0] == 'eventually':
         res = progress(ltl_formula[1], truth_assignment)
-        return ("or", ltl_formula, res)
+        return ("or", res, ltl_formula)
 
     if ltl_formula[0] == 'always':
         res = progress(ltl_formula[1], truth_assignment)
@@ -126,6 +415,89 @@ def progress(ltl_formula, truth_assignment):
     if ltl_formula[0] == 'until':
         res1 = progress(ltl_formula[1], truth_assignment)
         res2 = progress(ltl_formula[2], truth_assignment)
+
+        if res1 == 'False':
+            f1 = 'False'
+        elif res1 == 'True':
+            f1 = ('until', ltl_formula[1], ltl_formula[2])
+        else:
+            f1 = ('and', res1, ('until', ltl_formula[1], ltl_formula[2]))
+
+        if res2 == 'True':
+            return 'True'
+        if res2 == 'False':
+            return f1
+
+        # Returning ('or', res2, f1)
+        #if _subsume_until(f1, res2): return f1
+        #if _subsume_until(res2, f1): return res2
+        return ('or', res2, f1)
+
+
+
+def progress_eventually(ltl_formula, truth_assignment):
+    if type(ltl_formula) == str:
+        # True, False, or proposition
+        if len(ltl_formula) == 1:
+            # ltl_formula is a proposition
+            if ltl_formula in truth_assignment:
+                return 'True'
+            else:
+                return 'False'
+        return ltl_formula
+
+    if ltl_formula[0] == 'not':
+        # negations should be over propositions only according to the cosafe ltl syntactic restriction
+        result = progress_eventually(ltl_formula[1], truth_assignment)
+        if result == 'True':
+            return 'False'
+        elif result == 'False':
+            return 'True'
+        else:
+            raise NotImplementedError("The following formula doesn't follow the cosafe syntactic restriction: " + str(ltl_formula))
+
+    if ltl_formula[0] == 'and':
+        res1 = progress_eventually(ltl_formula[1], truth_assignment)
+        res2 = progress_eventually(ltl_formula[2], truth_assignment)
+        if res1 == 'True' and res2 == 'True': return 'True'
+        if res1 == 'False' or res2 == 'False': return 'False'
+        if res1 == 'True': return res2
+        if res2 == 'True': return res1
+        if res1 == res2:   return res1
+        #if _subsume_until(res1, res2): return res2
+        #if _subsume_until(res2, res1): return res1
+        return ('and',res1,res2)
+
+    if ltl_formula[0] == 'or':
+        res1 = progress_eventually(ltl_formula[1], truth_assignment)
+        res2 = progress_eventually(ltl_formula[2], truth_assignment)
+        if res1 == 'True'  or res2 == 'True'  : return 'True'
+        if res1 == 'False' and res2 == 'False': return 'False'
+        if res1 == 'False': return res2
+        if res2 == 'False': return res1
+        if res1 == res2:    return res1
+        #if _subsume_until(res1, res2): return res1
+        #if _subsume_until(res2, res1): return res2
+        return ('or',res1,res2)
+
+    if ltl_formula[0] == 'next':
+        return progress_eventually(ltl_formula[1], truth_assignment)
+
+    if ltl_formula[0] == 'eventually':
+        res = progress_eventually(ltl_formula[1], truth_assignment)
+        res=simplify(res)
+        if isinstance(res, tuple) and res[0] == 'eventually':
+        
+            return res
+        return ("or", res, ltl_formula)
+
+    if ltl_formula[0] == 'always':
+        res = progress_eventually(ltl_formula[1], truth_assignment)
+        return ("and", ltl_formula, res)
+
+    if ltl_formula[0] == 'until':
+        res1 = progress_eventually(ltl_formula[1], truth_assignment)
+        res2 = progress_eventually(ltl_formula[2], truth_assignment)
 
         if res1 == 'False':
             f1 = 'False'
@@ -339,152 +711,20 @@ def test_sampler():
     """
     # This list is now just used for *sampling*
     propositions_for_sampling = ['a', 'b', 'c','d','e','f','g','h','i','j','k','l']
-    # sampler = EventuallySampler(propositions_for_sampling, 
+    sampler = EventuallySampler(propositions_for_sampling, 
+                                min_levels=2, 
+                                max_levels=2, 
+                                min_conjunctions=2, 
+                                max_conjunctions=2)
+
+    # sampler= UntilTaskSampler(propositions_for_sampling, 
     #                             min_levels=2, 
-    #                             max_levels=3, 
-    #                             min_conjunctions=2, 
+    #                             max_levels=2, 
+    #                             min_conjunctions=3 ,
     #                             max_conjunctions=3)
 
-    sampler= UntilTaskSampler(propositions_for_sampling, 
-                                min_levels=4, 
-                                max_levels=4, 
-                                min_conjunctions=1, 
-                                max_conjunctions=1)
-
     
-    def simplify(formula):
-        """
-        Recursively simplifies an LTL formula tuple.
-        Applies associativity and idempotency for 'and'/'or'.
-        - Flattens nested 'and'/'or' operators.
-        - Removes duplicates (Idempotency: A | A = A).
-        - Rebuilds as a left-associative chain (order is not guaranteed).
-        """
-        # Base case: Proposition (string)
-        if not isinstance(formula, tuple):
-            return formula
-        
-        op = formula[0]
-        
-        # 1. Recursively simplify all operands first
-        operands = [simplify(opnd) for opnd in formula[1:]]
-        
-        if op in ('and', 'or'):
-            # --- 2. Associativity Step: Flatten ---
-            # Collect all operands from nested structures of the *same* operator
-            flattened_ops = []
-            for opnd in operands:
-                if isinstance(opnd, tuple) and opnd[0] == op:
-                    # ...add its operands (which are already simplified) to the list.
-                    flattened_ops.extend(opnd[1:])
-                else:
-                    # ...otherwise, just add the operand itself.
-                    flattened_ops.append(opnd)
-            
-            # --- 3. Idempotency Step: Remove Duplicates ---
-            # Since the tuples/strings used in the formula are hashable, 
-            # using set() is a fast way to remove all duplicates.
-            unique_ops = list(set(flattened_ops))
-            
-            # --- 4. Rebuild as a left-associative chain ---
-            # The order from list(set(...)) is arbitrary.
-            # This is fine, as canonical_form() will sort it later.
-            
-            if not unique_ops:
-                # An empty 'and' is True, an empty 'or' is False
-                return 'True' if op == 'and' else 'False'
-            
-            # Build the chain from the arbitrarily ordered unique list
-            result = unique_ops[0]
-            for i in range(1, len(unique_ops)):
-                result = (op, result, unique_ops[i])
-                
-            return result
-
-        elif op in ('not', 'eventually', 'always', 'next'):
-            # Unary operators
-            return (op, operands[0])
-        
-        elif op == 'until':
-            # Binary, non-commutative
-            return (op, operands[0], operands[1])
-        
-        else:
-            # Unknown operator
-            return (op,) + tuple(operands)
-
-
     
-        
-    def canonical_form(formula):
-        """
-        Recursively converts an LTL formula tuple into a canonical form.
-        Applies commutativity AND associativity for 'and'/'or'.
-        - Flattens nested 'and'/'or' operators.
-        - Sorts operands.
-        - Rebuilds as a left-associative chain.
-        """
-        # Base case: Proposition (string)
-        if not isinstance(formula, tuple):
-            return formula
-        
-        op = formula[0]
-        operands = formula[1:]
-        
-        # Recursively canonicalize all operands first
-        canonical_operands = [canonical_form(opnd) for opnd in operands]
-        
-        if op in ('and', 'or'):
-            # --- Associativity Step: Flatten ---
-            # Collect all operands from nested structures of the *same* operator
-            flattened_ops = []
-            for opnd in canonical_operands:
-                # If operand is a tuple AND its operator is the same as the current one...
-                if isinstance(opnd, tuple) and opnd[0] == op:
-                    # ...add its operands (which are already canonical) to the list.
-                    flattened_ops.extend(opnd[1:])
-                else:
-                    # ...otherwise, just add the operand itself.
-                    flattened_ops.append(opnd)
-            
-            # --- Commutativity Step: Sort ---
-            def sort_key(item):
-                # Sort by type (str vs tuple) first, then by string representation
-                is_tuple = isinstance(item, tuple)
-                return (is_tuple, str(item))
-            
-            sorted_ops = sorted(flattened_ops, key=sort_key)
-            
-            # --- Rebuild as a left-associative chain ---
-            # This ensures ('or', 'a', ('or', 'b', 'c')) and 
-            # ('or', ('or', 'a', 'b'), 'c')
-            # both become ('or', ('or', 'a', 'b'), 'c') after sorting.
-            
-            if not sorted_ops:
-                # This case handles an empty conjunction (True) or disjunction (False)
-                return 'True' if op == 'and' else 'False'
-            
-            # Start with the first operand
-            result = sorted_ops[0]
-            
-            # Iteratively add the rest, building the chain
-            for i in range(1, len(sorted_ops)):
-                result = (op, result, sorted_ops[i])
-                
-            return result
-
-        elif op in ('not', 'eventually', 'always', 'next'): # Expanded to include all unary ops
-            # Unary operators
-            return (op, canonical_operands[0])
-        
-        elif op == 'until':
-            # Binary, non-commutative
-            return (op, canonical_operands[0], canonical_operands[1])
-        
-        else:
-            # Unknown operator
-            return (op,) + tuple(canonical_operands)
-
 
     
     step_count = 0
@@ -497,15 +737,15 @@ def test_sampler():
             logging.info(f"🔥 Reached {step_count} iterations. Sampling a new formula.")
             logging.info("*"*20)
             current_formula = sampler.sample()
-            logging.info(f"new_formula {ltl_tuple_to_string(current_formula)}")
+            logging.info(f"\n--- 🔄 Processing New Formula ( {ltl_tuple_to_string(current_formula)}): ---")
             
         
         # This check is now more important, as we might pop 'True'/'False'
         if not isinstance(current_formula, tuple):
             current_formula = sampler.sample()
-            logging.info(f"Sampling new_formula {ltl_tuple_to_string(current_formula)}")
+            logging.info(f"\n--- 🔄 Processing New Formula ( {ltl_tuple_to_string(current_formula)}): ---")
         
-        logging.info(f"\n--- 🔄 Processing Formula (Step {step_count+1}): ---")
+        
 
         formula_props = get_propositions_in_formula(current_formula)
         all_single_prop_assignments = [[p] for p in random.sample(formula_props, len(formula_props))]
@@ -517,27 +757,30 @@ def test_sampler():
             
             try:
                 # 1. Get the raw progressed formula
-                progressed_formula = progress(current_formula, ta)
-                custom_simplified_formula= simplify(progressed_formula)
+                custom_progressed_formula = progress_eventually(current_formula, ta)
+                true_progressed_formula= progress(current_formula, ta)
+                
 
-                ltl_spot = _get_spot_format(progressed_formula)
+                ltl_spot = _get_spot_format(true_progressed_formula)
                 f = spot.formula(ltl_spot)
                 f = spot.simplify(f)
                 ltl_spot = f.__format__("l")
-                simplified_formula,r = _get_std_format(ltl_spot.split(' '))
+                true_simplified_formula,r = _get_std_format(ltl_spot.split(' '))
+                custom_simplified_formula= simplify(custom_progressed_formula)
+
                 # 3. Check if simplification occurred
-                can_progressed_formula=canonical_form(custom_simplified_formula)
-                can_simpilfied_formula=canonical_form(simplified_formula)
-                if  can_progressed_formula!= can_simpilfied_formula:
+                can_custom_formula=canonical_form(custom_simplified_formula)
+                can_true_formula=canonical_form(true_simplified_formula)
+                if  can_custom_formula!= can_true_formula:
                     #     print("    [DIFFERENT SIMPLIFICATION DETECTED! ]")
                     
                     # logging.info(f"      Not complete: {ltl_tuple_to_string(progressed_formula)}")
                     # logging.info(f"      Complete:  {ltl_tuple_to_string(simplified_formula)}")
-                    logging.info(f"      Not complete canonicalized: {ltl_tuple_to_string(can_progressed_formula)}")
-                    logging.info(f"      Complete canonicalized :  {ltl_tuple_to_string(can_simpilfied_formula)}")
+                    logging.info(f"      custom simplification: {ltl_tuple_to_string(can_custom_formula)}")
+                    logging.info(f"      true simplification :  {ltl_tuple_to_string(can_true_formula)}")
                 else:
-                    logging.info(f"      Complete == Not complete  is : {ltl_tuple_to_string(progressed_formula)}")
-                current_formula=simplified_formula
+                    logging.info(f"      simplification is same which is : {ltl_tuple_to_string(custom_simplified_formula)}")
+                current_formula=can_true_formula
                     
             except Exception as e:
                 print(f"     [ERROR] Error progressing formula: {e}")
