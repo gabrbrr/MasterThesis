@@ -266,3 +266,57 @@ python3 minigrid_sfl.py
 python3 minigrid_sfl.py
 python3 ltl_sfl.py
 exit
+cd sfl
+
+ls
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+pip show jax
+pip install jax[cpu]==0.4.17
+python3 ltl_plr.py
+exit
+make run
+pip show jax
+exit
+pip show jax
+exit
+pip uninstall -y hydra-core omegaconf pettingzoo tqdm safetensors chex brax mujoco matplotlib pillow scipy gymnax pandas optax distrax flashbax
+sudo pip uninstall -y hydra-core omegaconf pettingzoo tqdm safetensors chex brax mujoco matplotlib pillow scipy gymnax pandas optax distrax flashbax
+whoami
+# Give yourself write access to site-packages
+chmod -R u+w /usr/local/lib/python3.10/site-packages
+exit
+pip show jax
+exit
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+exit

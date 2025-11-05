@@ -8,6 +8,7 @@ defaults:
 "GROUP_NAME": "letter-plr"
 "ENTITY": ""
 "PROJECT": "letter"
-"WANDB_MODE" : "disabled"
+"WANDB_MODE" : "online"
 "SAVE_PATH": "checkpoints/new_letter"
-"CHECKPOINT_SAVE_INTERVAL": 0
+"CHECKPOINT_SAVE_INTERVAL": 1
+"run_name": "letter-plr-run"

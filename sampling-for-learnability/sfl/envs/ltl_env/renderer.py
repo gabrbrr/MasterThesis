@@ -124,7 +124,7 @@ class LTLEnvRenderer:
     def render_level(self, level: Level, env_params: EnvParams) -> chex.Array:
         """Renders a static Level representation."""
         # A Level contains the static map and agent start position
-        return (self._render_grid(level.letter_map, level.agent_pos),level.ltl_goal,level.ltl_root_idx,level.ltl_num_nodes)
+        return (self._render_grid(level.letter_map, level.agent_pos),level.ltl_formula,level.ltl_root_idx,level.ltl_num_nodes)
 
     @partial(jax.jit, static_argnums=(0,))
     def render_state(self, env_state: EnvState, env_params: EnvParams) -> chex.Array:

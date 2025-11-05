@@ -28,24 +28,24 @@ RUN pip install --no-cache-dir -U "jax[cpu]==0.4.17" "jaxlib==0.4.17"
 # Install other direct dependencies
 # This ensures they are present before your local package is installed.
 RUN pip install --no-cache-dir \
-    pandas \
-    optax \
-    distrax \
-    flashbax==0.1.0 \
+    # pandas \
+    # optax \
+    # distrax \
+    # flashbax==0.1.0 \
     wandb \
-    "hydra-core>=1.3.2" \
-    "omegaconf>=2.3.0" \
-    "pettingzoo>=1.24.3" \
-    "tqdm>=4.66.0" \
-    # "flax<=0.7.5" \ # Removed, as it's pinned above
-    safetensors \
-    chex \
-    "brax==0.10.3" \
-    "mujoco==3.1.3" \
-    matplotlib \
-    pillow \
-    "scipy<=1.12" \
-    gymnax\
+    # "hydra-core>=1.3.2" \
+    # "omegaconf>=2.3.0" \
+    # "pettingzoo>=1.24.3" \
+    # "tqdm>=4.66.0" \
+    # # "flax<=0.7.5" \ # Removed, as it's pinned above
+    # safetensors \
+    # chex \
+    # "brax==0.10.3" \
+    # "mujoco==3.1.3" \
+    # matplotlib \
+    # pillow \
+    # "scipy<=1.12" \
+    # gymnax\
     wandb[media]
 
 # ------------------------------------------------------------

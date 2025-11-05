@@ -116,6 +116,7 @@ def sample_trajectories(
         rng, train_state, obs, env_state = carry
         rng, rng_action, rng_step = jax.random.split(rng, 3)
         pi, value = train_state.apply_fn(train_state.params, obs)
+        value = value.squeeze(-1)
         action = pi.sample(seed=rng_action)
         log_prob = pi.log_prob(action)
 
@@ -139,6 +140,7 @@ def sample_trajectories(
     )
 
     _, last_value = train_state.apply_fn(train_state.params,last_obs)
+    last_value=last_value.squeeze(-1)
     return (rng, train_state, last_obs, last_env_state, last_value), traj
 
 def evaluate(
@@ -245,6 +247,7 @@ def update_actor_critic(
             
             def loss_fn(params):
                 pi, values_pred = train_state.apply_fn(params,obs)
+                values_pred=values_pred.squeeze(-1)
                 log_probs_pred = pi.log_prob(actions)
                 entropy = pi.entropy().mean()
 
@@ -506,7 +509,6 @@ class ActorCritic(nn.Module):
             A tuple containing:
             - v (jnp.ndarray): The state-value estimate (critic).
             - distribution (distrax.Distribution): The policy distribution (actor).
-            - carry (Any): The recurrent hidden state (None for this model).
         """
         
         # --- MODIFICATION: Use dataclass attributes ---
@@ -558,7 +560,7 @@ def setup_checkpointing(config: dict, train_state: TrainState, env: Underspecifi
     Returns:
         ocp.CheckpointManager: 
     """
-    overall_save_dir = os.path.join(os.getcwd(), "checkpoints", f"{config['run_name']}", str(config['seed']))
+    overall_save_dir = os.path.join(os.getcwd(), "checkpoints", f"{config["run_name"]}", str(config['seed']))
     os.makedirs(overall_save_dir, exist_ok=True)
     
     # save the config
