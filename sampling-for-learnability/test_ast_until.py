@@ -9,7 +9,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
 import re
-import random
+import random as py_random
+from jax import random
+from functools import partial
+from collections import OrderedDict
+import graphviz
+from PIL import Image, ImageDraw, ImageFont
+import os
+
 
 def get_propositions_in_formula(ltl_formula):
     """
@@ -116,9 +123,6 @@ def ltl_tuple_to_string(ltl_tuple):
 
 
 
-
-
-
 # Define a BuilderState to pass through loops
 class BuilderState(NamedTuple):
     """Holds the state of the graph construction."""
@@ -191,33 +195,37 @@ class JaxUntilTaskSampler:
         self.max_conjunctions = int(max_conjunctions)
         self.propositions = sorted(list(set(propositions)))
 
-        LTL_BASE_VOCAB = {
+        self.LTL_BASE_VOCAB = {
             "and": 0, "or": 1, "not": 2, "next": 3, "until": 4,
             "always": 5, "eventually": 6, "True": 7, "False": 8,
         }
         
-        self.PROPS_OFFSET = len(LTL_BASE_VOCAB)
+        self.PROPS_OFFSET = len(self.LTL_BASE_VOCAB)
         for i, el in enumerate(self.propositions):
-            LTL_BASE_VOCAB[el] = self.PROPS_OFFSET + i
-        self.prop_map=LTL_BASE_VOCAB
+            self.LTL_BASE_VOCAB[el] = self.PROPS_OFFSET + i
+        self.prop_map=self.LTL_BASE_VOCAB
    
         
         # Get all proposition indices as a JAX array for sampling
-        self.prop_indices = jnp.array(list(self.prop_map.values()), dtype=jnp.int32)
+        
         
         # Calculate the absolute maximum number of propositions we could need
         self.max_props_needed = 2 * self.max_levels * self.max_conjunctions
-        BASE_FEATURE_DIM = len(LTL_BASE_VOCAB)
-        # Add 1 for the 'is_root' flag
-        FEATURE_DIM = BASE_FEATURE_DIM + 1
+        self.vocab_size = len(self.LTL_BASE_VOCAB)
+        self.feature_size = self.vocab_size + 1 # One-hot + is_root
+
+        self.prop_indices = jnp.arange(len(self.propositions), dtype=jnp.int32)
         
+        self.EDGE_TYPES = {
+            "self": 0,
+            "arg": 1,    # For unary operators
+            "arg1": 2,   # For binary operator, arg 1
+            "arg2": 3,   # For binary operator, arg 2
+        }
+        # Create the inverse mapping for labeling
+        self.INV_EDGE_TYPES = {v: k for k, v in self.EDGE_TYPES.items()}
+        self.INV_LTL_BASE_VOCAB = {v: k for k, v in self.LTL_BASE_VOCAB.items()}
         
-        
-        # Define edge types from ASTBuilder context
-        self.EDGE_SELF = 0
-        self.EDGE_ARG = 1
-        self.EDGE_ARG1 = 2
-        self.self.EDGE_ARG2 = 3
 
         self._vmapped_progress = jax.vmap(
         self._progress_single_formula,
@@ -230,10 +238,11 @@ class JaxUntilTaskSampler:
                 f"Not enough propositions! Need at most {self.max_props_needed} "
                 f"(2 * max_levels * max_conjunctions), but only have {len(self.propositions)}."
             )
+
+    
    ############################### SAMPLE #######################################################################
     
-    @staticmethod
-    @jax.jit
+    @partial(jax.jit, static_argnames=['self'])
     def sample(self, key: PRNGKey) -> ConjunctionState:
         """
         Samples a new LTL task and returns its JAX ConjunctionState.
@@ -319,11 +328,11 @@ class JaxUntilTaskSampler:
             to_progress=to_progress,
             depths=depths,
             already_true=already_true
-        )
+        ), n_conjs, jnp.average(sampled_depths)
 
-    @staticmethod
-    @jax.jit
+    @partial(jax.jit, static_argnames=['self'])
     def _progress_single_formula(
+        self,
         state: SingleFormulaState,
         current_props: jnp.ndarray,
         depth: jnp.ndarray # The *actual* depth of this formula
@@ -385,9 +394,9 @@ class JaxUntilTaskSampler:
     #   - current_props (None, broadcast)
     #   - depths (axis 0)
     
-    @staticmethod
-    @jax.jit
+    @partial(jax.jit, static_argnames=['self'])
     def progress(
+        self, 
         state: ConjunctionState,
         current_props: jnp.ndarray
     ) -> Tuple[ConjunctionState, jnp.ndarray, jnp.ndarray]:
@@ -434,6 +443,7 @@ class JaxUntilTaskSampler:
             depths=state.depths,
             already_true=new_already_true
         )
+        is_false_overall = jnp.any(is_false_this_step & progressing_mask)
         
         return new_conjunction_state, is_true_overall, is_false_overall
 
@@ -443,12 +453,12 @@ class JaxUntilTaskSampler:
     
     
     ###################################### AST TREE ###############################################################
-
-    def _one_hot_base(token_id: jnp.ndarray) -> jnp.ndarray:
-        """Creates the base one-hot vector (size 22)."""
-        return jax.nn.one_hot(token_id, BASE_FEATURE_DIM, dtype=jnp.float32)
-
+    @partial(jax.jit, static_argnames=['self'])
+    def _one_hot_base(self, token_id: jnp.ndarray) -> jnp.ndarray:
+        return jax.nn.one_hot(token_id, self.vocab_size, dtype=jnp.float32)
+    @partial(jax.jit, static_argnames=['self'])
     def _add_node(
+        self,
         builder_state: BuilderState, 
         token_id: jnp.ndarray
     ) -> Tuple[BuilderState, jnp.ndarray]:
@@ -459,7 +469,7 @@ class JaxUntilTaskSampler:
         idx = builder_state.node_idx
         
         # Create base features
-        base_features = _one_hot_base(token_id)
+        base_features = self._one_hot_base(token_id)
         
         # Create the 'is_root' feature, defaulting to 0.0
         is_root_feature = jnp.array([0.0], dtype=jnp.float32)
@@ -476,7 +486,7 @@ class JaxUntilTaskSampler:
         # Add self-loop edge
         senders = builder_state.senders.at[builder_state.edge_idx].set(idx)
         receivers = builder_state.receivers.at[builder_state.edge_idx].set(idx)
-        edge_types = builder_state.edge_types.at[builder_state.edge_idx].set(self.EDGE_SELF)
+        edge_types = builder_state.edge_types.at[builder_state.edge_idx].set(self.EDGE_TYPES["self"])
         
         new_state = builder_state._replace(
             node_idx=idx + 1,
@@ -487,8 +497,9 @@ class JaxUntilTaskSampler:
             edge_types=edge_types
         )
         return new_state, idx
-    
+    @partial(jax.jit, static_argnames=['self'])
     def _add_edge(
+        self,
         builder_state: BuilderState, 
         sender: jnp.ndarray, 
         receiver: jnp.ndarray, 
@@ -506,8 +517,9 @@ class JaxUntilTaskSampler:
             receivers=receivers,
             edge_types=edge_types
         )
-    
+    @partial(jax.jit, static_argnames=['self'])
     def _build_binary_tree(
+        self,
         builder_state: BuilderState,
         leaf_indices: jnp.ndarray,
         leaf_mask: jnp.ndarray,
@@ -544,11 +556,11 @@ class JaxUntilTaskSampler:
             right_child_idx = compressed_leaves[start_idx]
             
             # Add new parent node (is_root defaults to 0.0)
-            builder_state, new_root_idx = _add_node(builder_state, jnp.array(op_token))
+            builder_state, new_root_idx = self._add_node(builder_state, jnp.array(op_token))
             
             # Add edges: child -> parent
-            builder_state = _add_edge(builder_state, root_idx, new_root_idx, self.EDGE_ARG1)
-            builder_state = _add_edge(builder_state, right_child_idx, new_root_idx, self.EDGE_ARG2)
+            builder_state = self._add_edge(builder_state, root_idx, new_root_idx, self.EDGE_TYPES["arg1"])
+            builder_state = self._add_edge(builder_state, right_child_idx, new_root_idx, self.EDGE_TYPES["arg2"])
             
             return (builder_state, new_root_idx)
     
@@ -584,7 +596,9 @@ class JaxUntilTaskSampler:
             branch_index,
             [case_zero, case_one, case_many]
         )
+    @partial(jax.jit, static_argnames=['self'])
     def _build_subformula_until(
+        self,
         builder_state: BuilderState,
         avoid_props: jnp.ndarray,
         prog_props: jnp.ndarray,
@@ -599,18 +613,18 @@ class JaxUntilTaskSampler:
         # 1. Build the innermost (base case) formula
         last_idx = formula_depth - 1
         
-        b_state, until_idx = _add_node(builder_state, jnp.array(self.LTL_BASE_VOCAB["until"]))
-        b_state, not_idx = _add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["not"]))
+        b_state, until_idx = self._add_node(builder_state, jnp.array(self.LTL_BASE_VOCAB["until"]))
+        b_state, not_idx = self._add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["not"]))
         
         avoid_token = avoid_props[last_idx] + self.PROPS_OFFSET
-        b_state, avoid_idx = _add_node(b_state, avoid_token)
+        b_state, avoid_idx = self._add_node(b_state, avoid_token)
         
         prog_token = prog_props[last_idx] + self.PROPS_OFFSET
-        b_state, prog_idx = _add_node(b_state, prog_token)
+        b_state, prog_idx = self._add_node(b_state, prog_token)
         
-        b_state = _add_edge(b_state, not_idx, until_idx, self.EDGE_ARG1)
-        b_state = _add_edge(b_state, prog_idx, until_idx, self.EDGE_ARG2)
-        b_state = _add_edge(b_state, avoid_idx, not_idx, self.EDGE_ARG)
+        b_state = self._add_edge(b_state, not_idx, until_idx, self.EDGE_TYPES["arg1"])
+        b_state = self._add_edge(b_state, prog_idx, until_idx, self.EDGE_TYPES["arg2"])
+        b_state = self._add_edge(b_state, avoid_idx, not_idx, self.EDGE_TYPES["arg"])
         
         current_root_idx = until_idx
     
@@ -618,22 +632,22 @@ class JaxUntilTaskSampler:
         def wrap_loop_body(m, state):
             b_state, current_root_idx = state
             
-            b_state, new_until_idx = _add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["until"]))
-            b_state, new_not_idx = _add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["not"]))
+            b_state, new_until_idx = self._add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["until"]))
+            b_state, new_not_idx = self._add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["not"]))
             
             avoid_token = avoid_props[m] + self.PROPS_OFFSET
-            b_state, new_avoid_idx = _add_node(b_state, avoid_token)
+            b_state, new_avoid_idx = self._add_node(b_state, avoid_token)
             
-            b_state, new_and_idx = _add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["and"]))
+            b_state, new_and_idx = self._add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["and"]))
             
             prog_token = prog_props[m] + self.PROPS_OFFSET
-            b_state, new_prog_idx = _add_node(b_state, prog_token)
+            b_state, new_prog_idx = self._add_node(b_state, prog_token)
             
-            b_state = _add_edge(b_state, new_not_idx, new_until_idx, self.EDGE_ARG1)
-            b_state = _add_edge(b_state, new_and_idx, new_until_idx, self.EDGE_ARG2)
-            b_state = _add_edge(b_state, new_avoid_idx, new_not_idx, self.EDGE_ARG)
-            b_state = _add_edge(b_state, new_prog_idx, new_and_idx, self.EDGE_ARG1)
-            b_state = _add_edge(b_state, current_root_idx, new_and_idx, self.EDGE_ARG2)
+            b_state = self._add_edge(b_state, new_not_idx, new_until_idx, self.EDGE_TYPES["arg1"])
+            b_state = self._add_edge(b_state, new_and_idx, new_until_idx, self.EDGE_TYPES["arg2"])
+            b_state = self._add_edge(b_state, new_avoid_idx, new_not_idx, self.EDGE_TYPES["arg"])
+            b_state = self._add_edge(b_state, new_prog_idx, new_and_idx, self.EDGE_TYPES["arg1"])
+            b_state = self._add_edge(b_state, current_root_idx, new_and_idx, self.EDGE_TYPES["arg2"])
             
             return (b_state, new_until_idx)
     
@@ -652,8 +666,8 @@ class JaxUntilTaskSampler:
     
         return final_state, final_root_idx
     
-    
-    def _build_formula_or_tree(
+    @partial(jax.jit, static_argnames=['self'])
+    def _build_formula_or_tree(self, 
         builder_state: BuilderState,
         formula_idx: int,
         state: ConjunctionState
@@ -693,7 +707,7 @@ class JaxUntilTaskSampler:
                 is_active = active_mask[m] & (m < formula_depth)
                 
                 def build_it():
-                    return _build_subformula_until(
+                    return self._build_subformula_until(
                         b_state, avoid_props, prog_props, formula_depth, m
                     )
                 
@@ -722,7 +736,7 @@ class JaxUntilTaskSampler:
             # This will hit case_one() or case_many().
             # It will NOT hit case_zero() because is_false check
             # in the outer switch already handled the 0-active-pointer case.
-            return _build_binary_tree(
+            return self._build_binary_tree(
                 final_b_state,
                 all_leaf_indices,
                 active_leaf_mask,
@@ -737,9 +751,9 @@ class JaxUntilTaskSampler:
             [case_true, case_false, case_active]
         )
     
-    @staticmethod
-    @jax.jit
-    def build_ast(state: ConjunctionState) -> OrderedDict:
+    
+    @partial(jax.jit, static_argnames=['self'])
+    def build_ast(self, state: ConjunctionState) -> OrderedDict:
         """
         JIT-compilable function to convert a ConjunctionState into a binary AST graph.
         
@@ -763,10 +777,10 @@ class JaxUntilTaskSampler:
         MAX_EDGES = MAX_NODES * 3
     
         # --- 2. Initialize Buffers ---
-        nodes = jnp.zeros((MAX_NODES, STATIC_FEATURE_DIM), dtype=jnp.float32)
+        nodes = jnp.zeros((MAX_NODES, self.feature_size), dtype=jnp.float32)
         senders = jnp.full((MAX_EDGES,), 0, dtype=jnp.int32)
         receivers = jnp.full((MAX_EDGES,), 0, dtype=jnp.int32)
-        edge_types = jnp.full((MAX_EDGES,),self.EDGE_SELF, dtype=jnp.int32)
+        edge_types = jnp.full((MAX_EDGES,),self.EDGE_TYPES["self"], dtype=jnp.int32)
     
         builder_state = BuilderState(
             node_idx=jnp.array(1),
@@ -783,7 +797,7 @@ class JaxUntilTaskSampler:
             b_state = carry_state
             
             # This now returns -1 for True/False formulas
-            b_state, formula_root_idx = _build_formula_or_tree(b_state, n, state)
+            b_state, formula_root_idx = self._build_formula_or_tree(b_state, n, state)
             
             return b_state, formula_root_idx
     
@@ -801,7 +815,7 @@ class JaxUntilTaskSampler:
         
         # This builds the final 'AND' tree.
         # If valid_leaf_mask is all False, this returns global_root_idx = -1
-        final_b_state, global_root_idx = _build_binary_tree(
+        final_b_state, global_root_idx = self._build_binary_tree(
             final_b_state,
             all_formula_leaf_indices,
             valid_leaf_mask, # The modified mask
@@ -835,8 +849,8 @@ class JaxUntilTaskSampler:
     
     
     ##################################### DECODE ##################################################################
-    @staticmethod
-    def decode_formula(
+    
+    def decode_formula(self, 
         state: ConjunctionState, 
     ) -> Any:
         """
@@ -864,15 +878,15 @@ class JaxUntilTaskSampler:
             # Start from the innermost formula
             # !avoid[depth-1] U prog[depth-1]
             curr = ('until', 
-                    ('not', self.PROPS[avoid_arr[depth-1]]), 
-                    self.PROPS[prog_arr[depth-1]])
+                    ('not', self.propositions[avoid_arr[depth-1]]), 
+                    self.propositions[prog_arr[depth-1]])
             
             # Wrap it outwards
             for i in range(depth - 2, -1, -1):
                 # !(avoid[i]) U (prog[i] & curr)
                 curr = ('until',
-                        ('not', self.PROPS[avoid_arr[i]]),
-                        ('and', self.PROPS[prog_arr[i]], curr))
+                        ('not', self.propositions[avoid_arr[i]]),
+                        ('and', self.propositions[prog_arr[i]], curr))
             return curr
         
         num_conjunctions = state.depths.shape[0]
@@ -887,7 +901,7 @@ class JaxUntilTaskSampler:
             
             # Reconstruct the original full formula for this index
             original_formula = _reconstruct_single_formula(
-                state.to_avoid[n], state.to_progress[n], depth, self.PROPS
+                state.to_avoid[n], state.to_progress[n], depth,
             )
             
             # Find which sub-formulas are active
@@ -915,8 +929,8 @@ class JaxUntilTaskSampler:
 #########################     ENCODE ########################################################################################
     
   
-    @staticmethod
-    def encode_formula(
+    
+    def encode_formula(self, 
         ltl_tuple: Union[tuple, str],
     ) -> ConjunctionState:
         """
@@ -1092,7 +1106,7 @@ class JaxUntilTaskSampler:
                 relative_depth = _find_subformula_depth(base_formula_tuple, sub_tuple)
                 active_pointers = active_pointers.at[relative_depth].set(True)
         
-            return active_pointers, to_avoid, to_progress, depth, False # Not 'already_true'
+            return active_pointers, to_avoid, to_progress, depth, False 
     
         
        
@@ -1154,460 +1168,319 @@ class JaxUntilTaskSampler:
             already_true=jnp.array(all_already_true, dtype=bool)
         )
 
+#############################################  VISUALIZE AST    ###########################################
 
+    def visualize_ast(self, ast_data: OrderedDict, img_size=(1290, 1080)):
+        """
+        Visualizes an LTL AST graph from a data dictionary using
+        Networkx and Matplotlib.
 
+        Args:
+            ast_data (OrderedDict): An ordered dictionary containing the graph data.
+            img_size (tuple): The target (width, height) in pixels for the
+                              output image.
 
-
-
-# --- JAX-native Helper Functions ---
-
-
-
-
-def visualize_ast(
-    graph_tuple: OrderedDict, 
-    props_list: List[str], 
-    title: str
-):
-    """
-    Draws the AST graph using NetworkX and Matplotlib.
-    
-    You may need to install graphviz for the 'dot' layout:
-    pip install pygraphviz (or pydot)
-    """
-    
-    # Define reverse maps for labels
-    TOKEN_MAP = {
-        0: "PAD",
-        1: "UNTIL",
-        2: "AND",
-        3: "OR",
-        4: "NOT",
-        5: "TRUE",  # Will not be created, but map exists
-        6: "FALSE", # Will not be created, but map exists
-    }
-    
-    EDGE_TYPE_MAP = {
-        0: "self",
-        1: "arg",
-        2: "arg1",
-        3: "arg2",
-    }
-    
-    # Extract data from graph tuple
-    n_node = graph_tuple['n_node'][0]
-    n_edge = graph_tuple['n_edge'][0]
-    
-    if n_node <= 1:
-        print(f"Visualization for '{title}': Graph is empty (n_node={n_node}).")
-        return
-
-    nodes = np.array(graph_tuple['nodes'])[:n_node]
-    senders = np.array(graph_tuple['senders'])[:n_edge]
-    receivers = np.array(graph_tuple['receivers'])[:n_edge]
-    edge_types = np.array(graph_tuple['edge_types'])[:n_edge]
-    
-    G = nx.DiGraph()
-    node_labels = {}
-    node_colors = []
-    
-    # Add nodes with labels and colors
-    for i in range(n_node):
-        feat = nodes[i]
-        token_id = np.argmax(feat[:-1]) # Get token from base features
-        is_root = feat[-1] == 1.0
+        Returns:
+            PIL.Image.Image: A PIL Image object of the rendered graph, or None
+                             if plotting fails.
+        """
         
-        label = ""
-        if token_id in TOKEN_MAP:
-            label = TOKEN_MAP[token_id]
-        else:
-            # It's a proposition
-            prop_index = token_id - 7 # (self.PROPS_OFFSET + 1)
-            if 0 <= prop_index < len(props_list):
-                label = props_list[prop_index]
+        try:
+            # 1. Extract data
+            nodes = ast_data['nodes']
+            senders = ast_data['senders']
+            receivers = ast_data['receivers']
+            
+            # <-- MODIFIED: Use .item() to get Python scalars from JAX arrays
+            # This is safer and more direct than .reshape(1)[0]
+            n_node = ast_data['n_node'].item()
+            n_edge = ast_data['n_edge'].item()
+            
+            edge_types = ast_data['edge_types']
+            
+            # 2. Slice data
+            nodes = nodes[:n_node]
+            senders = senders[:n_edge]
+            receivers = receivers[:n_edge]
+            edge_types = edge_types[:n_edge]
+
+        except KeyError as e:
+            print(f"Error: Missing key in ast_data: {e}", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"Error extracting data: {e}", file=sys.stderr)
+            return None
+
+        # 3. Build the Networkx Graph
+        G = nx.DiGraph()
+        node_labels = {}
+        node_colors = []
+        edge_labels = {}
+        
+        # 4. Add all nodes
+        for i in range(n_node):
+            node_id = str(i) # Use string IDs for consistency
+            node_features = nodes[i]
+            
+            try:
+                # <-- MODIFIED: .item() converts unhashable JAX scalar to Python int
+                vocab_index = np.argmax(node_features[:-1]).item() 
+                label = self.INV_LTL_BASE_VOCAB.get(vocab_index, f"UNK_{vocab_index}")
+            except Exception as e:
+                label = f"Error: {e}"
+
+            # <-- MODIFIED: .item() converts JAX bool to Python bool
+            is_root = (node_features[-1] == 1).item() 
+            
+            G.add_node(node_id)
+            
+            if is_root:
+                node_colors.append('lightgreen')
+                node_labels[node_id] = f"{label}\n(ROOT)"
             else:
-                label = f"PROP_?"
+                node_colors.append('lightblue')
+                node_labels[node_id] = label
 
-        G.add_node(i)
-        node_labels[i] = label
-        node_colors.append("lightcoral" if is_root else "lightblue")
-
-    # Add edges with labels
-    edge_labels = {}
-    for i in range(n_edge):
-        u, v = int(senders[i]), int(receivers[i])
-        edge_type_id = int(edge_types[i])
-        
-        # Don't draw self-loops to reduce clutter
-        if u == v:
-            continue
+        # 5. Add all edges
+        for j in range(n_edge):
+            # Use .item() to convert numpy types to standard python types
+            sender_id = str(senders[j].item()) 
+            receiver_id = str(receivers[j].item())
             
-        G.add_edge(u, v)
-        if edge_type_id in EDGE_TYPE_MAP:
-            edge_labels[(u, v)] = EDGE_TYPE_MAP[edge_type_id]
+            edge_type_index = edge_types[j]
+            if hasattr(edge_type_index, 'item'):
+                edge_type_index = edge_type_index.item()
+                
+            edge_label = self.INV_EDGE_TYPES.get(edge_type_index, f"UNK_{edge_type_index}")
             
-    # Draw the graph
-    plt.figure(figsize=(16, 10))
-    
-    # Use graphviz 'dot' layout for hierarchical trees if available
-    try:
-        # Note: Requires `pip install pygraphviz` or `pip install pydot`
-        pos = nx.drawing.nx_pydot.graphviz_layout(G, prog='dot')
-    except ImportError:
-        print("Graphviz (pydot/pygraphviz) not found. Using spring layout.")
-        print("For a better tree layout, run: pip install pydot")
-        pos = nx.spring_layout(G)
-        
-    nx.draw(
-        G, 
-        pos, 
-        node_color=node_colors, 
-        labels=node_labels, 
-        with_labels=True, 
-        node_size=3000, 
-        font_size=10, 
-        font_weight="bold",
-        arrows=True,
-        arrowsize=20
-    )
-    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='red')
-    plt.title(title, fontsize=20)
-    filename = title.lower()
-    filename = re.sub(r'\n+', '_', filename) # Replace newlines with underscore
-    filename = re.sub(r'[\s:]+', '_', filename) # Replace spaces and colons
-    filename = re.sub(r'[^\w_]+', '', filename) # Remove other non-alphanumeric
-    filename = re.sub(r'_+', '_', filename).strip('_') # Consolidate underscores
-    
-    if not filename: # Handle empty or invalid titles
-        filename = "ast_visualization"
-        
-    filename = f"{filename}.png"
-    
-    try:
-        # Save the figure to the current directory
-        plt.savefig(filename, bbox_inches='tight')
-        print(f"✅ Saved graph to '{filename}'")
-    except Exception as e:
-        print(f"❌ Error saving graph to '{filename}': {e}")
+            # Skip "self" loops
+            if edge_label == "self":
+                continue
+                
+            G.add_edge(sender_id, receiver_id)
+            edge_labels[(sender_id, receiver_id)] = edge_label
 
+        # 6. Plot with Matplotlib
+        dpi = 100
+        figsize = (img_size[0] / dpi, img_size[1] / dpi)
+        
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        
+        try:
+            # 7. Get layout
+            try:
+                pos = nx.drawing.nx_pydot.graphviz_layout(G, prog='dot')
+            except ImportError:
+                print("Warning: pydot not found. Using spring_layout.", file=sys.stderr)
+                print("Install pydot for a hierarchical tree layout.", file=sys.stderr)
+                pos = nx.spring_layout(G, seed=42)
+            
+            # 8. Draw graph components
+            nx.draw_networkx_nodes(
+                G, pos, ax=ax, node_color=node_colors, 
+                node_size=50, node_shape='s'
+            )
+            nx.draw_networkx_edges(
+                G, pos, ax=ax, arrowstyle='->', arrowsize=20, 
+                node_size=50, connectionstyle='arc3,rad=0.1'
+            )
+            nx.draw_networkx_labels(
+                G, pos, ax=ax, labels=node_labels, font_size=9
+            )
+            nx.draw_networkx_edge_labels(
+                G, pos, ax=ax, edge_labels=edge_labels, font_size=7
+            )
+            
+            ax.axis('off')
+            fig.tight_layout(pad=0)
+            
+            # 9. Save plot to in-memory buffer
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
+            buf.seek(0)
+            
+            # 10. Open as PIL Image and resize
+            img = Image.open(buf)
+            img = img.resize(img_size, Image.Resampling.LANCZOS)
+            
+            return img
 
-def test_and_visualize():
+        except Exception as e:
+            print(f"Error during Networkx/Matplotlib plotting: {e}", file=sys.stderr)
+            return None
+        finally:
+            plt.close(fig)
+
+def main():
     """
-    Runs several test scenarios and visualizes the generated ASTs.
+    Test main function to:
+    1. Sample a task.
+    2. Progress it randomly for several steps, **sampling ONE letter at a time**.
+    3. Build the AST for each step.
+    4. Decode the formula for each step.
+    5. Save a grid of the ASTs showing the progression.
     """
     
-    # --- Setup ---
-    PROPS = ['a', 'b', 'c','d','e','f','g','h','i','j','k','l']
-    MAX_CONJUNCTIONS = 1
-    MAX_DEPTH = 6
+    # --- 1. Setup ---
+    print("Setting up sampler...")
+    PROPS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j','l','m']
+    MAX_LEVELS = 3
+    MAX_CONJUNCTIONS = 2
+    NUM_STEPS = 4 # Max number of steps to show
     
+    # Image grid settings
+    IMG_SIZE = (400, 300) # Size for each individual plot
+    PADDING = 20
+    TITLE_HEIGHT = 70      # Space above each plot for the title
+    GRID_COLS = 3
+
     sampler = JaxUntilTaskSampler(
         propositions=PROPS,
-        min_levels=MAX_DEPTH,
-        max_levels=MAX_DEPTH,
+        min_levels=MAX_LEVELS,
+        max_levels=MAX_LEVELS,
         min_conjunctions=MAX_CONJUNCTIONS,
         max_conjunctions=MAX_CONJUNCTIONS
     )
     
-    key = jax.random.PRNGKey(random.randint(1,300))
+    key = jax.random.PRNGKey(42)
     
-    # --- Test 1: Fresh State ---
-    print("--- Running Test 1: Fresh State ---")
+    # --- 2. Sample Initial Task ---
+    print("Sampling initial task...")
     key, sample_key = jax.random.split(key)
-    state = sampler.sample(sample_key)
-    print(ltl_tuple_to_string(decode_formula(state,PROPS)))
-    print("Sampled State (already_true):", state.already_true)
-    graph = state_to_ast(state)
-    visualize_ast(graph, PROPS, "Test 1: Fresh Sampled State (N=2, M=3)")
+    state, c, l = sampler.sample(sample_key)
+    print("avg",int(c),float(l))
 
-TOKEN_MAP = {
-    0: "PAD",
-    1: "UNTIL",
-    2: "AND",
-    3: "OR",
-    4: "NOT",
-    5: "TRUE",
-    6: "FALSE",
-}
+    images = []
+    titles = []
+    sampled_letter = "None" # For first title
 
-EDGE_TYPE_MAP = {
-    0: "self",
-    1: "arg",
-    2: "arg1",
-    3: "arg2",
-}
+    # --- 3. Simulation Loop ---
+    print(f"Starting simulation loop for max {NUM_STEPS} steps...")
+    for t in range(NUM_STEPS):
+        print(f"--- Step {t} ---")
+        
+        # 3a. Decode formula for title
+        formula_str = ltl_tuple_to_string(sampler.decode_formula(state))
+        title = f"Step {t} (Sampled: {sampled_letter})\n{formula_str}"
+        titles.append(title)
+        print(f"Formula: {formula_str}")
 
-# --- NEW HELPER FUNCTION ---
-def _draw_ast_on_ax(
-    ax: plt.Axes, 
-    graph_tuple: OrderedDict, 
-    props_list: List[str], 
-    title: str
-):
-    """
-    Draws the AST graph onto a provided Matplotlib Axes object.
-    (This is the core logic from your `visualize_ast` refactored for subplots)
-    """
+        ast_data = sampler.build_ast(state)
+        try:
+            # Use new function
+            img = sampler.visualize_ast(ast_data, img_size=IMG_SIZE)
+            
+            if img is None:
+                 raise Exception("visualize_ast returned None (plotting failed)")
+
+            images.append(img)
+        except Exception as e:
+            print(f"Final state rendering failed: {e}")
+            img = Image.new('RGB', IMG_SIZE, 'white') # Placeholder
+            draw = ImageDraw.Draw(img)
+            draw.text((10, 10), f"Plotting failed\n{e}", fill='red')
+            images.append(img)
+        
+        # *** START MODIFICATION ***
+        # 3d. Progress the state randomly (ONE letter at a time)
+        key, step_key, prop_key = jax.random.split(key, 3)
+        
+        # Sample a single proposition index to set to True
+        # sampler.prop_indices already has the offset (e.g., 8, 9, 10...)
+        sampled_prop_index = jax.random.choice(
+            prop_key,
+            sampler.prop_indices,
+            shape=(1,) # Sample one index
+        )[0] # Get the scalar index
+        print(sampler.prop_indices[sampled_prop_index])
+        # Create the full boolean array (all False)
+        current_props_np = np.zeros(len(PROPS), dtype=bool)
+        # Set only the sampled proposition to True
+        current_props_np[sampled_prop_index] = True 
+        current_props = jnp.array(current_props_np)
+        
+        # Get the name of the letter for logging and the next title
+        sampled_letter = sampler.INV_LTL_BASE_VOCAB[int(sampled_prop_index)+sampler.PROPS_OFFSET]
+        print(f"Sampling letter: {sampled_letter}")
+        # *** END MODIFICATION ***
+
+        # Run the progress step
+        state, is_conj_true, is_conj_false = sampler.progress(state, current_props)
+        print(is_conj_true,is_conj_false)
+        
+        # 3e. Check for terminal state
+        if is_conj_true:
+            print("Conjunction resolved to TRUE. Stopping.")
+            break
+        if is_conj_false:
+            print("Conjunction resolved to FALSE. Stopping.")
+            break
     
-    # Extract data from graph tuple
-    n_node = graph_tuple['n_node'][0]
-    n_edge = graph_tuple['n_edge'][0]
-    
-    if n_node <= 1:
-        ax.text(0.5, 0.5, f"Graph is empty (n_node={n_node})", 
-                horizontalalignment='center', verticalalignment='center', 
-                transform=ax.transAxes)
-        ax.set_title(title, fontsize=12)
+    # --- 4. Handle Final State (if loop broke) ---
+    if (t < NUM_STEPS - 1): # Loop broke early
+        print(f"--- Final State (Step {t+1}) ---")
+        formula_str = ltl_tuple_to_string(sampler.decode_formula(state))
+        title = f"Step {t+1} (Final State)\n{formula_str}"
+        titles.append(title)
+        print(f"Formula: {formula_str}")
+        
+        ast_data = sampler.build_ast(state)
+        try:
+            # Use new function
+            img = sampler.visualize_ast(ast_data, img_size=IMG_SIZE)
+            
+            if img is None:
+                 raise Exception("visualize_ast returned None (plotting failed)")
+
+            images.append(img)
+        except Exception as e:
+            print(f"Final state rendering failed: {e}")
+            img = Image.new('RGB', IMG_SIZE, 'white') # Placeholder
+            draw = ImageDraw.Draw(img)
+            draw.text((10, 10), f"Plotting failed\n{e}", fill='red')
+            images.append(img)
+
+    # --- 5. Create Image Grid ---
+    if not images:
+        print("No images were generated.")
         return
 
-    nodes = np.array(graph_tuple['nodes'])[:n_node]
-    senders = np.array(graph_tuple['senders'])[:n_edge]
-    receivers = np.array(graph_tuple['receivers'])[:n_edge]
-    edge_types = np.array(graph_tuple['edge_types'])[:n_edge]
+    print("Creating image grid...")
+    num_images = len(images)
+    grid_rows = (num_images + GRID_COLS - 1) // GRID_COLS
     
-    G = nx.DiGraph()
-    node_labels = {}
-    node_colors = []
+    grid_width = (IMG_SIZE[0] * GRID_COLS) + (PADDING * (GRID_COLS + 1))
+    grid_height = ((IMG_SIZE[1] + TITLE_HEIGHT) * grid_rows) + (PADDING * (grid_rows + 1))
     
-    # Add nodes
-    for i in range(n_node):
-        feat = nodes[i]
-        token_id = np.argmax(feat[:-1]) # Get token
-        is_root = feat[-1] == 1.0
-        
-        label = ""
-        if token_id in TOKEN_MAP:
-            label = TOKEN_MAP[token_id]
-        else:
-            prop_index = token_id - 7 # (self.PROPS_OFFSET + 1)
-            if 0 <= prop_index < len(props_list):
-                label = props_list[prop_index]
-            else:
-                label = f"PROP_?"
-
-        G.add_node(i)
-        node_labels[i] = label
-        node_colors.append("lightcoral" if is_root else "lightblue")
-
-    # Add edges
-    edge_labels = {}
-    for i in range(n_edge):
-        u, v = int(senders[i]), int(receivers[i])
-        edge_type_id = int(edge_types[i])
-        
-        if u == v: continue # Skip self-loops
-            
-        G.add_edge(u, v)
-        if edge_type_id in EDGE_TYPE_MAP:
-            edge_labels[(u, v)] = EDGE_TYPE_MAP[edge_type_id]
-            
-    # Draw the graph
+    grid_image = Image.new('RGB', (grid_width, grid_height), 'white')
+    draw = ImageDraw.Draw(grid_image)
+    
     try:
-        pos = nx.drawing.nx_pydot.graphviz_layout(G, prog='dot')
-    except ImportError:
-        print("Warning: Graphviz not found. Using spring layout.")
-        pos = nx.spring_layout(G)
+        # Try to load a nicer font
+        font = ImageFont.truetype("arial.ttf", 14)
+    except IOError:
+        print("Arial font not found, using default.")
+        font = ImageFont.load_default()
+
+    for i, (img, title) in enumerate(zip(images, titles)):
+        row = i // GRID_COLS
+        col = i % GRID_COLS
         
-    nx.draw(
-        G, 
-        pos, 
-        ax=ax,  # <-- Draw on the provided axis
-        node_color=node_colors, 
-        labels=node_labels, 
-        with_labels=True, 
-        node_size=2500, 
-        font_size=9, 
-        font_weight="bold",
-        arrows=True,
-        arrowsize=20
-    )
-    nx.draw_networkx_edge_labels(G, pos, ax=ax, edge_labels=edge_labels, font_color='red')
-    ax.set_title(title, fontsize=12, pad=10) # Set subplot title
-
-
-# --- NEW GRID VISUALIZATION FUNCTION ---
-def visualize_progression_grid(
-    progression_steps: List[Tuple[OrderedDict, str]],
-    props_list: List[str],
-    grid_title: str,
-    max_cols: int = 3
-):
-    """
-    Creates and saves a grid of AST visualizations representing a formula's progression.
-    
-    Args:
-        progression_steps: A list of (graph_tuple, formula_string) tuples.
-        props_list: The list of proposition names.
-        grid_title: The main title for the entire grid.
-        max_cols: Maximum number of columns in the grid.
-    """
-    
-    n_steps = len(progression_steps)
-    if n_steps == 0:
-        print("No progression steps to visualize.")
-        return
-
-    # Calculate grid dimensions
-    n_cols = min(n_steps, max_cols)
-    n_rows = (n_steps + n_cols - 1) // n_cols # Ceiling division
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 8, n_rows * 6.5))
-    
-    # Ensure axes is always a 2D array for easy iteration
-    if n_rows == 1 and n_cols == 1:
-        axes = np.array([[axes]])
-    elif n_rows == 1:
-        axes = np.array([axes])
-    elif n_cols == 1:
-        axes = np.array([[ax] for ax in axes])
+        # Calculate top-left corner for this cell
+        x_offset = PADDING + col * (IMG_SIZE[0] + PADDING)
+        y_offset = PADDING + row * (IMG_SIZE[1] + TITLE_HEIGHT + PADDING)
         
-    axes_flat = axes.flatten()
-
-    print(f"Generating grid '{grid_title}' with {n_steps} steps...")
-
-    # Draw each step on its subplot
-    for i, (graph_tuple, formula_str) in enumerate(progression_steps):
-        ax = axes_flat[i]
-        step_title = f"Step {i}\n{formula_str}"
-        if i == 0:
-            step_title = f"Step 0 (Start)\n{formula_str}"
-        _draw_ast_on_ax(ax, graph_tuple, props_list, step_title)
+        # Draw Title
+        draw.text((x_offset + 5, y_offset + 5), title, fill='black', font=font)
         
-    # Hide any unused subplots
-    for i in range(n_steps, len(axes_flat)):
-        axes_flat[i].axis('off')
-        
-    # Add main title
-    fig.suptitle(grid_title, fontsize=24, y=1.0)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.96]) # Adjust for main title
-    
-    # --- Filename Generation ---
-    filename = grid_title.lower()
-    filename = re.sub(r'\n+', '_', filename) # Replace newlines
-    filename = re.sub(r'[\s:]+', '_', filename) # Replace spaces/colons
-    filename = re.sub(r'[^\w_]+', '', filename) # Remove non-alphanumeric
-    filename = re.sub(r'_+', '_', filename).strip('_') # Consolidate
-    
-    if not filename:
-        filename = "formula_progression"
-    
-    # Add a suffix to denote it's a grid
-    filename = f"grid_{filename}.png"
+        # Paste Image
+        grid_image.paste(img, (x_offset, y_offset + TITLE_HEIGHT))
 
-    # --- Save Figure ---
-    try:
-        plt.savefig(filename, bbox_inches='tight', dpi=100)
-        print(f"✅ Saved progression grid to '{filename}'")
-    except Exception as e:
-        print(f"❌ Error saving grid to '{filename}': {e}")
-    
-    plt.close(fig) # Close the figure to free memory
-
-
-# --- MODIFIED MAIN FUNCTION ---
-def test_and_visualize_progression(
-    n_formulas_to_test: int = 3,
-    max_progression_steps: int = 5
-):
-    """
-    Samples N formulas and generates a visualization grid for the
-    progression of each one.
-    """
-    
-    # --- Setup ---
-    PROPS = ['a', 'b', 'c','d','e','f','g','h','i','j','k','l']
-    PROP_TO_INT = {prop: i  for i, prop in enumerate(PROPS)}
-    INT_TO_PROP = {i : prop for i, prop in enumerate(PROPS)}
-    NUM_PROPOSITIONS = len(PROPS)
-    
-    MAX_DEPTH = 2
-    MAX_CONJUNCTIONS = 3
-    
-    sampler = JaxUntilTaskSampler(
-        propositions=PROPS,
-        min_levels=MAX_DEPTH,
-        max_levels=MAX_DEPTH,
-        min_conjunctions=MAX_CONJUNCTIONS,
-        max_conjunctions=MAX_CONJUNCTIONS
-    )
-    
-    key = jax.random.PRNGKey(1)
-    el=["d","f","g"]
-    # --- Main Loop ---
-    for i in range(n_formulas_to_test):
-        print("\n" + "="*50)
-        print(f"🧪 Sampling and Progressing Formula {i+1}/{n_formulas_to_test}")
-        print("="*50)
-        
-        # 1. Sample a new formula state
-        key, sample_key = jax.random.split(key)
-        current_state = sampler.sample(sample_key)
-        
-        # This list will store all (graph, title) tuples for the grid
-        progression_steps: List[Tuple[OrderedDict, str]] = []
-
-        initial_formula_str = ""
-        
-        # 2. Loop for progression steps
-        #for step in range(max_progression_steps + 1): # +1 to include initial state
-        for step, elem in enumerate(el):   
-            # Decode the current state for its string representation
-            formula_tuple = decode_formula(current_state, INT_TO_PROP)
-            formula_str = ltl_tuple_to_string(formula_tuple)
-            
-            if step == 0:
-                initial_formula_str = formula_str
-                print(f"  Start: {formula_str}")
-            else:
-                print(f"  Step {step}: {formula_str}")
-
-            # Get the graph representation (AST) from the state
-            graph_tuple = state_to_ast(current_state)
-            
-            # Add the state's graph and formula to our list for visualization
-            progression_steps.append((graph_tuple, formula_str))
-            
-            # --- Check for termination ---
-            if formula_tuple == "True" or formula_tuple == "False":
-                print(f"  Formula terminated.")
-                break
-                
-           # if step >= max_progression_steps:
-           #     break # Reached max steps for this formula
-                
-            current_props = get_propositions_in_formula(formula_tuple)
-            current_props = [p for p in current_props if p != 'NULL']
-            
-            if not current_props:
-                # Formula has no propositions (e.g., "X(True)")
-                # We can't meaningfully progress, so we stop
-                print("  No propositions found. Stopping progression.")
-                break
-            
-            # Randomly pick one proposition to be true
-            ta_prop = random.choice(list(current_props))
-            ta_prop=elem
-            # Create the truth assignment vector for the jitted function
-            print("stepping",ta_prop)
-            props_true = jnp.zeros(NUM_PROPOSITIONS + 1, dtype=bool).at[PROP_TO_INT[ta_prop]].set(True)
-            
-            # 3. Progress the state
-            # jitted_progress returns (new_state, reward, done)
-            current_state, _, _ = jitted_progress(current_state, props_true)
-            
-        # 4. All steps for this formula are collected, visualize the grid
-        grid_title = f"Formula {i+1} Progression\nStart: {initial_formula_str}"
-        visualize_progression_grid(progression_steps, PROPS, grid_title)
+    # --- 6. Save Final Image ---
+    output_filename = "ast_progression_grid_single_letter.png"
+    grid_image.save(output_filename)
+    print(f"\nSuccess! Saved AST progression grid to {output_filename}")
 
 
 if __name__ == "__main__":
-    # Ensure you have graphviz installed for the 'dot' layout:
-    # pip install pygraphviz
-    # or
-    # pip install pydot
-    
-    # Run the new test function
-    test_and_visualize_progression(
-        n_formulas_to_test=1,      # How many different formulas to sample
-        max_progression_steps=5  # Max progression steps per formula (total grid size = 1 + this)
-    )
+    main()
