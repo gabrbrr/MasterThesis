@@ -14,1037 +14,2349 @@ Original file is located at
 
 #!pip install --upgrade rlax
 
-"""#Utils"""
+
 
 import jax
 import jax.numpy as jnp
-import numpy as np
-
-
-propositions = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
-
-LTL_BASE_VOCAB = {
-    "and": 0, "or": 1, "not": 2, "next": 3, "until": 4,
-    "always": 5, "eventually": 6, "True": 7, "False": 8,
-}
-
-PROP_OFFSET = len(LTL_BASE_VOCAB)
-for i, el in enumerate(propositions):
-    LTL_BASE_VOCAB[el] = PROP_OFFSET + i
-# Define constants AND OR ... for easier access
-globals().update({k.upper(): v for k, v in LTL_BASE_VOCAB.items() if v < PROP_OFFSET})
-NUM_PROPS = len(propositions)
-TRUE_VAL = LTL_BASE_VOCAB["True"]
-FALSE_VAL = LTL_BASE_VOCAB["False"]
-VOCAB_SIZE = len(LTL_BASE_VOCAB)
-VOCAB_INV = {v: k for k, v in LTL_BASE_VOCAB.items()}
-
-# Use jax.numpy for constants to be used in JIT'd code
-_is_unary_op_np = np.zeros(VOCAB_SIZE, dtype=bool)
-_is_unary_op_np[NOT] = True
-_is_unary_op_np[NEXT] = True
-_is_unary_op_np[EVENTUALLY] = True
-_is_unary_op_np[ALWAYS] = True
-IS_UNARY_OP = jnp.array(_is_unary_op_np)
-
-_is_binary_op_np = np.zeros(VOCAB_SIZE, dtype=bool)
-_is_binary_op_np[AND] = True
-_is_binary_op_np[OR] = True
-_is_binary_op_np[UNTIL] = True
-IS_BINARY_OP = jnp.array(_is_binary_op_np)
-
-MAX_NODES = 200 # Maximum size of the formula array
-
-def encode_letters(letter_str: str) -> tuple:
-    """Helper function to encode a string of letters into a tuple of IDs."""
-    return tuple(LTL_BASE_VOCAB[l] for l in letter_str)
-
-def encode_formula(formula):
-        """Recursively encodes a formula from string/tuple to integer representation."""
-        if isinstance(formula, str):
-            return LTL_BASE_VOCAB[formula]
-        if isinstance(formula, tuple): return tuple(encode_formula(f) for f in formula)
-        raise ValueError(f"Unsupported element type: {formula}")
-
-
-def encode_formula_to_array(formula, vocab, array, index=0):
-    if isinstance(formula, int):
-        array[index] = [formula, 0, 0]
-        return index + 1
-
-    op, children = formula[0], formula[1:]
-
-    if len(children) == 1:
-        array[index] = [op, index + 1, 0]
-        return encode_formula_to_array(children[0], vocab, array, index + 1)
-    elif len(children) == 2:
-        left_index = index + 1
-        right_start_index = encode_formula_to_array(children[0], vocab, array, left_index)
-        array[index] = [op, left_index, right_start_index]
-        return encode_formula_to_array(children[1], vocab, array, right_start_index)
-    raise ValueError("Formulas must have 1 or 2 children")
-
-
-def decode_array_to_formula(array, node_index, num_valid_nodes, visited_nodes=None):
-    if visited_nodes is None:
-        visited_nodes = set()
-    node_index=int(node_index)
-    if not (0 <= node_index < num_valid_nodes):
-        return f"invalid_ref_{node_index}"
-
-    # A cycle is detected only if we revisit a non-terminal node.
-    # Shared terminal nodes like 'True' or 'False' are valid.
-    op_val, left_idx, right_idx = array[node_index]
-
-    op_val, left_idx, right_idx = int(op_val), int(left_idx), int(right_idx)
-    is_terminal = not (IS_UNARY_OP[op_val] or IS_BINARY_OP[op_val])
-
-    if not is_terminal and node_index in visited_nodes:
-        return f"ref_{node_index}"
-
-    visited_nodes.add(node_index)
-
-    op_str = VOCAB_INV.get(op_val, f"p{op_val}")
-
-    if is_terminal:
-        # Once we decode a terminal, we can remove it from the visited set
-        # to allow it to be decoded again if shared by another branch.
-        # This is not strictly necessary with the above check, but is good practice.
-        visited_nodes.remove(node_index)
-        return op_str
-
-    if IS_UNARY_OP[op_val]:
-        child = decode_array_to_formula(array, int(left_idx), num_valid_nodes, visited_nodes)
-        visited_nodes.remove(node_index)
-        return (op_str, child)
-
-    if IS_BINARY_OP[op_val]:
-        left_child = decode_array_to_formula(array, int(left_idx), num_valid_nodes, visited_nodes)
-        right_child = decode_array_to_formula(array, int(right_idx), num_valid_nodes, visited_nodes)
-        visited_nodes.remove(node_index)
-        return (op_str, left_child, right_child)
-
-    # Should be unreachable if logic is correct
-    visited_nodes.remove(node_index)
-    return op_str
-
-"""# sampler"""
-
-"""
-This class is responsible for sampling LTL formulas typically from
-given template(s).
-
-@ propositions: The set of propositions to be used in the sampled
-                formula at random.
-"""
-import random
-
-
-class LTLSampler():
-    def __init__(self, propositions):
-        self.propositions = propositions
-
-    def sample(self):
-        raise NotImplementedError
-
-
-# Samples from one of the other samplers at random. The other samplers are sampled by their default args.
-class SuperSampler(LTLSampler):
-    def __init__(self, propositions):
-        super().__init__(propositions)
-        self.reg_samplers = getRegisteredSamplers(self.propositions)
-
-    def sample(self):
-        return random.choice(self.reg_samplers).sample()
-
-# This class samples formulas of form (or, op_1, op_2), where op_1 and 2 can be either specified as samplers_ids
-# or by default they will be sampled at random via SuperSampler.
-class OrSampler(LTLSampler):
-    def __init__(self, propositions, sampler_ids = ["SuperSampler"]*2):
-        super().__init__(propositions)
-        self.sampler_ids = sampler_ids
-
-    def sample(self):
-        return ('or', getLTLSampler(self.sampler_ids[0], self.propositions).sample(),
-                        getLTLSampler(self.sampler_ids[1], self.propositions).sample())
-
-# This class generates random LTL formulas using the following template:
-#   ('until',('not','a'),('and', 'b', ('until',('not','c'),'d')))
-# where p1, p2, p3, and p4 are randomly sampled propositions
-class DefaultSampler(LTLSampler):
-    def sample(self):
-        p = random.sample(self.propositions,4)
-        return ('until',('not',p[0]),('and', p[1], ('until',('not',p[2]),p[3])))
-
-# This class generates random conjunctions of Until-Tasks.
-# Each until tasks has *n* levels, where each level consists
-# of avoiding a proposition until reaching another proposition.
-#   E.g.,
-#      Level 1: ('until',('not','a'),'b')
-#      Level 2: ('until',('not','a'),('and', 'b', ('until',('not','c'),'d')))
-#      etc...
-# The number of until-tasks, their levels, and their propositions are randomly sampled.
-# This code is a generalization of the DefaultSampler---which is equivalent to UntilTaskSampler(propositions, 2, 2, 1, 1)
-class UntilTaskSampler(LTLSampler):
-    def __init__(self, propositions, min_levels=2, max_levels=2, min_conjunctions=2 , max_conjunctions=2):
-        super().__init__(propositions)
-        self.levels       = (int(min_levels), int(max_levels))
-        self.conjunctions = (int(min_conjunctions), int(max_conjunctions))
-        assert 2*int(max_levels)*int(max_conjunctions) <= len(propositions), "The domain does not have enough propositions!"
-
-    def sample(self):
-        # Sampling a conjuntion of *n_conjs* (not p[0]) Until (p[1]) formulas of *n_levels* levels
-        n_conjs = random.randint(*self.conjunctions)
-        p = random.sample(self.propositions,2*self.levels[1]*n_conjs)
-        ltl = None
-        b = 0
-        for i in range(n_conjs):
-            n_levels = random.randint(*self.levels)
-            # Sampling an until task of *n_levels* levels
-            until_task = ('until',('not',p[b]),p[b+1])
-            b +=2
-            for j in range(1,n_levels):
-                until_task = ('until',('not',p[b]),('and', p[b+1], until_task))
-                b +=2
-            # Adding the until task to the conjunction of formulas that the agent have to solve
-            if ltl is None: ltl = until_task
-            else:           ltl = ('and',until_task,ltl)
-        return ltl
-
-
-# This class generates random LTL formulas that form a sequence of actions.
-# @ min_len, max_len: min/max length of the random sequence to generate.
-class SequenceSampler(LTLSampler):
-    def __init__(self, propositions, min_len=2, max_len=4):
-        super().__init__(propositions)
-        self.min_len = int(min_len)
-        self.max_len = int(max_len)
-
-    def sample(self):
-        length = random.randint(self.min_len, self.max_len)
-        seq = ""
-
-        while len(seq) < length:
-            c = random.choice(self.propositions)
-            if len(seq) == 0 or seq[-1] != c:
-                seq += c
-
-        ret = self._get_sequence(seq)
-
-        return ret
-
-    def _get_sequence(self, seq):
-        if len(seq) == 1:
-            return ('eventually',seq)
-        return ('eventually',('and', seq[0], self._get_sequence(seq[1:])))
-
-# This generates several sequence tasks which can be accomplished in parallel.
-# e.g. in (eventually (a and eventually c)) and (eventually b)
-# the two sequence tasks are "a->c" and "b".
-class EventuallySampler(LTLSampler):
-    def __init__(self, propositions, min_levels = 1, max_levels=4, min_conjunctions=1, max_conjunctions=3):
-        super().__init__(propositions)
-        assert(len(propositions) >= 3)
-        self.conjunctions = (int(min_conjunctions), int(max_conjunctions))
-        self.levels = (int(min_levels), int(max_levels))
-
-    def sample(self):
-        conjs = random.randint(*self.conjunctions)
-        ltl = None
-
-        for i in range(conjs):
-            task = self.sample_sequence()
-            if ltl is None:
-                ltl = task
-            else:
-                ltl = ('and',task,ltl)
-        return ltl
-
-
-    def sample_sequence(self):
-        length = random.randint(*self.levels)
-        seq = []
-
-        last = []
-        while len(seq) < length:
-            # Randomly replace some propositions with a disjunction to make more complex formulas
-            population = [p for p in self.propositions if p not in last]
-
-            if random.random() < 0.25:
-                c = random.sample(population, 2)
-            else:
-                c = random.sample(population, 1)
-
-            seq.append(c)
-            last = c
-
-        ret = self._get_sequence(seq)
-
-        return ret
-
-    def _get_sequence(self, seq):
-        term = seq[0][0] if len(seq[0]) == 1 else ('or', seq[0][0], seq[0][1])
-        if len(seq) == 1:
-            return ('eventually',term)
-        return ('eventually',('and', term, self._get_sequence(seq[1:])))
-
-
-class AdversarialEnvSampler(LTLSampler):
-    def sample(self):
-        p = random.randint(0,1)
-        if p == 0:
-            return ('eventually', ('and', 'a', ('eventually', 'b')))
-        else:
-            return ('eventually', ('and', 'a', ('eventually', 'c')))
-
-def getRegisteredSamplers(propositions):
-    return [SequenceSampler(propositions),
-            UntilTaskSampler(propositions),
-            DefaultSampler(propositions),
-            EventuallySampler(propositions)]
-
-# The LTLSampler factory method that instantiates the proper sampler
-# based on the @sampler_id.
-def getLTLSampler(sampler_id, propositions):
-    if sampler_id is None:
-        return DefaultSampler(propositions)
-    tokens = ["Default"]
-    if (sampler_id != None):
-        tokens = sampler_id.split("_")
-
-    # Don't change the order of ifs here otherwise the OR sampler will fail
-    if (tokens[0] == "OrSampler"):
-        return OrSampler(propositions)
-    elif ("_OR_" in sampler_id): # e.g., Sequence_2_4_OR_UntilTask_3_3_1_1
-        sampler_ids = sampler_id.split("_OR_")
-        return OrSampler(propositions, sampler_ids)
-    elif (tokens[0] == "Sequence"):
-        return SequenceSampler(propositions, tokens[1], tokens[2])
-    elif (tokens[0] == "Until"):
-        return UntilTaskSampler(propositions, tokens[1], tokens[2], tokens[3], tokens[4])
-    elif (tokens[0] == "SuperSampler"):
-        return SuperSampler(propositions)
-    elif (tokens[0] == "Adversarial"):
-        return AdversarialEnvSampler(propositions)
-    elif (tokens[0] == "Eventually"):
-        return EventuallySampler(propositions, tokens[1], tokens[2], tokens[3], tokens[4])
-    else: # "Default"
-        return DefaultSampler(propositions)
-
-import jax
-import jax.numpy as jnp
-import numpy as np
+from jax import lax
+from jax.random import PRNGKey
+from collections import OrderedDict
+from typing import NamedTuple, Tuple, List, Dict, Any, Union
 from functools import partial
+import numpy as np
+import matplotlib.pyplot as plt
+import networkx as nx
+import re
+import random as py_random
 from jax import random
-class JaxUntilTaskSampler():
-    def __init__(self, propositions, min_levels=1, max_levels=3, min_conjunctions=1, max_conjunctions=2):
-        self.prop_tokens = jnp.array([LTL_BASE_VOCAB[p] for p in propositions],dtype=jnp.int32)
-        self.num_props = len(propositions)
-        self.min_levels = min_levels
-        self.max_levels = max_levels
-        self.min_conjunctions = min_conjunctions
-        self.max_conjunctions = max_conjunctions
-        # Probability of choosing a disjunction ('or') of two propositions
-        self.disjunction_prob = 0.25
-        self.max_props_needed = 2 * max_levels * max_conjunctions
-        assert self.max_props_needed <= len(self.prop_tokens), "Not enough propositions for the given max settings!"
-
-
-    @partial(jax.jit, static_argnames=("self"))
-    def sample(self, key):
-        """
-        JAX-compatible function to sample a complex 'Until' task.
-
-        This function builds a formula of the form:
-        (Task_1) AND (Task_2) AND ... AND (Task_n_conjs)
-        where each Task_i is a nested 'Until' formula:
-        U(!p1, p2 AND U(!p3, p4 AND ...))
-
-        Args:
-            key: A jax.random.PRNGKey for random operations.
-            min_levels, max_levels: Min/max nesting depth for each 'Until' sub-formula.
-            min_conjunctions, max_conjunctions: Min/max number of 'Until' sub-formulas to be joined by 'AND'.
-
-        Returns:
-            A tuple containing:
-            - formula_array (jnp.ndarray): The encoded formula in a (MAX_NODES, 3) array.
-            - num_nodes (int): The number of valid nodes used in the array.
-            - root_idx (int): The index of the root node of the final formula.
-            - num_conjuncts (int): The number of conjunctions in the formula.
-            - num_levels (int): The total number of levels across all conjunctions.
-        """
-        # --- 1. Initial Setup and Random Sampling ---
-        key, n_conjs_key, p_key = jax.random.split(key, 3)
-
-        # Sample the number of conjunctions
-        n_conjs = jax.random.randint(n_conjs_key, (), self.min_conjunctions, self.max_conjunctions + 1)
-
-        # Sample all propositions needed upfront without replacement.
-        # We must sample the maximum possible number to ensure a static shape for JIT.
-
-        p = jax.random.choice(p_key, self.prop_tokens, shape=(self.max_props_needed,), replace=False)
-
-        # --- 2. Define Loop Bodies for jax.lax.fori_loop ---
-
-        def build_nested_until_task(key, formula_array, start_node_idx, start_prop_idx, n_levels):
-            """Builds one nested 'Until' sub-formula."""
-
-            # Base case: U(not p[b], p[b+1])
-            # This requires 4 nodes: p[b], p[b+1], NOT, and UNTIL.
-            p1_idx = start_node_idx
-            p0_idx = start_node_idx + 1
-            not_p0_idx = start_node_idx + 2
-            until_root_idx = start_node_idx + 3
-
-            formula_array = formula_array.at[p1_idx].set(jnp.array([p[start_prop_idx + 1], 0, 0]))
-            formula_array = formula_array.at[p0_idx].set(jnp.array([p[start_prop_idx], 0, 0]))
-            formula_array = formula_array.at[not_p0_idx].set(jnp.array([NOT, p0_idx, 0]))
-            formula_array = formula_array.at[until_root_idx].set(jnp.array([UNTIL, not_p0_idx, p1_idx]))
-
-            prop_idx = start_prop_idx + 2
-            node_idx = start_node_idx + 4
-
-            # Inner loop state: (key, formula_array, node_idx, prop_idx, current_until_root)
-            initial_inner_carry = (key, formula_array, node_idx, prop_idx, until_root_idx)
-
-            def inner_loop_body(j, carry):
-                """Adds one level of nesting: U(not p_new, (and p_next, old_until_task))"""
-                l_key, l_formula_array, l_node_idx, l_prop_idx, l_until_root_idx = carry
-
-                # This requires 5 new nodes: p_next, p_new, NOT, AND, UNTIL
-                p_next_idx      = l_node_idx
-                p_new_idx       = l_node_idx + 1
-                not_p_new_idx   = l_node_idx + 2
-                and_idx         = l_node_idx + 3
-                new_until_root  = l_node_idx + 4
-
-                # p_next
-                l_formula_array = l_formula_array.at[p_next_idx].set(jnp.array([p[l_prop_idx + 1], 0, 0]))
-                # p_new
-                l_formula_array = l_formula_array.at[p_new_idx].set(jnp.array([p[l_prop_idx], 0, 0]))
-                # not p_new
-                l_formula_array = l_formula_array.at[not_p_new_idx].set(jnp.array([NOT, p_new_idx, 0]))
-                # p_next AND old_until_task
-                l_formula_array = l_formula_array.at[and_idx].set(jnp.array([AND, p_next_idx, l_until_root_idx]))
-                # U(not p_new, (...))
-                l_formula_array = l_formula_array.at[new_until_root].set(jnp.array([UNTIL, not_p_new_idx, and_idx]))
-
-                return (l_key, l_formula_array, l_node_idx + 5, l_prop_idx + 2, new_until_root)
-
-            # Loop n_levels - 1 times to add the nested layers
-            key, formula_array, node_idx, prop_idx, until_root_idx = jax.lax.fori_loop(
-                0, n_levels - 1, inner_loop_body, initial_inner_carry
-            )
-            return key, formula_array, node_idx, prop_idx, until_root_idx
-
-        def outer_loop_body(i, carry):
-            """Builds one 'Until' task and ANDs it with the main formula."""
-            key, formula_array, node_idx, prop_idx, ltl_root_idx, total_levels = carry
-            key, n_levels_key, build_key = jax.random.split(key, 3)
-
-            # Sample levels for this specific sub-formula
-            n_levels = jax.random.randint(n_levels_key, (), self.min_levels, self.max_levels + 1)
-
-            new_total_levels = total_levels + n_levels
-
-            # Build the sub-formula
-            build_key, formula_array, new_node_idx, new_prop_idx, until_task_root = build_nested_until_task(
-                build_key, formula_array, node_idx, prop_idx, n_levels
-            )
-
-            # If this is the first task, it becomes the root.
-            # Otherwise, create an AND node to join it with the existing formula.
-            def first_task_fn(_):
-                return until_task_root, formula_array, new_node_idx
-
-            def subsequent_task_fn(_):
-                and_node_idx = new_node_idx
-                new_array = formula_array.at[and_node_idx].set(jnp.array([AND, until_task_root, ltl_root_idx]))
-                return and_node_idx, new_array, new_node_idx + 1
-
-            new_ltl_root, formula_array, node_idx = jax.lax.cond(
-                ltl_root_idx == -1,  # Use -1 as a sentinel for the first task
-                first_task_fn,
-                subsequent_task_fn,
-                operand=None
-            )
-
-            return key, formula_array, node_idx, new_prop_idx, new_ltl_root, new_total_levels
-
-        # --- 3. Execute Main Loop ---
-
-        # Initial state for the main loop
-        # carry = (key, formula_array, node_idx, prop_idx, ltl_root_idx)
-        initial_carry = (
-            key,
-            jnp.full((MAX_NODES, 3), -1, dtype=jnp.int32), # Formula array
-            0,                                             # Next available node index
-            0,                                             # Next available proposition index
-            -1,
-             0,                                                                                         # Root of the combined formula
-        )
-
-        # Run the loop for n_conjs iterations
-        _, final_array, num_nodes, _, root_idx, total_levels = jax.lax.fori_loop(
-            0, n_conjs, outer_loop_body, initial_carry
-        )
-        avg_levels = total_levels.astype(jnp.float32) / n_conjs.astype(jnp.float32)
-        return final_array, num_nodes, root_idx, n_conjs, avg_levels
-
-
-
-class JaxEventuallySampler:
-    """
-    A class to generate complex LTL formulas using a JIT-compiled JAX sampler.
-    The sampler's static configuration is provided during initialization, and
-    the JIT compilation happens once.
-    """
-    def __init__(self, propositions, min_levels=1, max_levels=5, min_conjunctions=1, max_conjunctions=4):
-        self.propositions = jnp.array([LTL_BASE_VOCAB[p] for p in propositions],dtype=jnp.int32)
-        self.min_levels = min_levels
-        self.max_levels = max_levels
-        self.min_conjunctions = min_conjunctions
-        self.max_conjunctions = max_conjunctions
-        assert(len(propositions) >= 3)
-
-        self._jitted_sampler = partial(
-            jax.jit(self._static_sampler, static_argnames=(
-                "min_levels", "max_levels", "min_conjunctions", "max_conjunctions"
-            )),
-            min_levels=self.min_levels,
-            max_levels=self.max_levels,
-            min_conjunctions=self.min_conjunctions,
-            max_conjunctions=self.max_conjunctions,
-            propositions=self.propositions
-        )
-
-    def sample(self, key):
-        """
-        Generates a new LTL formula sample.
-        Args:
-            key (jax.random.PRNGKey): The random key for this specific sample generation.
-        Returns:
-            A tuple of (formula_array, num_nodes, root_id).
-        """
-        return self._jitted_sampler(key=key)
-
-    @staticmethod
-    def _static_sampler(key, propositions, min_levels, max_levels, min_conjunctions, max_conjunctions):
-        """
-        The core JAX-jittable static method to generate LTL formulas.
-        """
-        formula_array = jnp.zeros((MAX_NODES, 3), dtype=jnp.int32)
-
-        key, subkey = random.split(key)
-        num_conjs = random.randint(subkey, shape=(), minval=min_conjunctions, maxval=max_conjunctions + 1)
-
-        def _sample_sequence_task(carry, _):
-            key, formula_array, next_node_idx = carry
-            key, subkey = random.split(key)
-            seq_length = random.randint(subkey, shape=(), minval=min_levels, maxval=max_levels + 1)
-
-            def _generate_seq_body(i, state):
-                key, formula_array, next_node_idx, last_prop_ids, seq_node_ids = state
-                mask = jnp.all(propositions[:, None] != last_prop_ids[None, :], axis=1)
-                safe_mask = jnp.where(mask.sum() == 0, jnp.ones_like(mask), mask)
-                probs = safe_mask.astype(jnp.float32) / safe_mask.sum()
-
-                key, subkey_cond, subkey_disj = random.split(key, 3)
-
-                def _create_disjunction(k):
-                    p1, p2 = random.choice(k, propositions, shape=(2,), replace=False, p=probs)
-                    node_idx, p1_idx, p2_idx = next_node_idx, next_node_idx + 1, next_node_idx + 2
-                    arr = formula_array.at[node_idx].set(jnp.array([OR, p1_idx, p2_idx]))
-                    arr = arr.at[p1_idx].set(jnp.array([p1, 0, 0]))
-                    arr = arr.at[p2_idx].set(jnp.array([p2, 0, 0]))
-                    return arr, node_idx, next_node_idx + 3, jnp.array([p1, p2])
-
-                def _create_single_prop(k):
-                    p1 = random.choice(k, propositions, shape=(1,), p=probs)[0]
-                    node_idx = next_node_idx
-                    arr = formula_array.at[node_idx].set(jnp.array([p1, 0, 0]))
-                    return arr, node_idx, next_node_idx + 1, jnp.array([p1, -1])
-
-                arr, node_id, next_idx, new_last_props = jax.lax.cond(
-                    random.uniform(subkey_cond) < 0.25, _create_disjunction, _create_single_prop, subkey_disj)
-                seq_node_ids = seq_node_ids.at[i].set(node_id)
-                return key, arr, next_idx, new_last_props, seq_node_ids
-
-            init_seq_state = (key, formula_array, next_node_idx, jnp.array([-1, -1]), jnp.full((max_levels,), -1, dtype=jnp.int32))
-            key, formula_array, next_node_idx, _, seq_node_ids = jax.lax.fori_loop(0, seq_length, _generate_seq_body, init_seq_state)
-
-            def _build_nested_formula(i, state):
-                rev_i = seq_length - 2 - i
-                _, formula_array, next_node_idx, current_root_id = state
-                prop_node_id = seq_node_ids[rev_i]
-                and_node_id = next_node_idx
-                formula_array = formula_array.at[and_node_id].set(jnp.array([AND, prop_node_id, current_root_id]))
-                eventually_node_id = next_node_idx + 1
-                formula_array = formula_array.at[eventually_node_id].set(jnp.array([EVENTUALLY, and_node_id, 0]))
-                return key, formula_array, next_node_idx + 2, eventually_node_id
-
-            last_prop_node_id = seq_node_ids[seq_length - 1]
-            initial_root_id = next_node_idx
-            formula_array = formula_array.at[initial_root_id].set(jnp.array([EVENTUALLY, last_prop_node_id, 0]))
-
-            init_build_state = (key, formula_array, next_node_idx + 1, initial_root_id)
-
-            _, formula_array, next_node_idx, final_root_id = jax.lax.cond(
-                seq_length > 1,
-                lambda: jax.lax.fori_loop(0, seq_length - 1, _build_nested_formula, init_build_state),
-                lambda: init_build_state)
-
-            return (key, formula_array, next_node_idx), final_root_id, seq_length
-
-        def _main_conj_loop_body(i, state):
-            key, formula_array, next_node_idx, overall_root_id, total_levels = state
-            (key, formula_array, next_node_idx), new_task_root_id, seq_length = _sample_sequence_task((key, formula_array, next_node_idx), 0)
-            new_total_levels = total_levels + seq_length
-            def _combine_with_and(op):
-                prev_root_id, new_root_id, arr, idx = op
-                and_node_id = idx
-                arr = arr.at[and_node_id].set(jnp.array([AND, new_root_id, prev_root_id]))
-                return arr, idx + 1, and_node_id
-
-            def _first_task(op):
-                _, new_root_id, arr, idx = op
-                return arr, idx, new_root_id
-
-            formula_array, next_node_idx, overall_root_id = jax.lax.cond(
-                i > 0, _combine_with_and, _first_task, (overall_root_id, new_task_root_id, formula_array, next_node_idx))
-            return key, formula_array, next_node_idx, overall_root_id, new_total_levels
-
-        init_main_state = (key, formula_array, 0, -1, 0)
-        key, formula_array, num_nodes, root_id, total_levels= jax.lax.fori_loop(0, num_conjs, _main_conj_loop_body, init_main_state)
-        avg_levels = total_levels.astype(jnp.float32) / num_conjs.astype(jnp.float32)
-        return formula_array, num_nodes, root_id, num_conjs, avg_levels
-
-"""# progression"""
-
-import jax
-import jax.numpy as jnp
-import jax.lax as lax
-from dataclasses import dataclass
-from typing import Dict, Tuple, List, Union
 from functools import partial
-import numpy as np
-import spot
+from collections import OrderedDict
+import graphviz
+from PIL import Image, ImageDraw, ImageFont
+import os
 
-def simplify_spot(array, node_index, num_valid_nodes):
-    tuple_string_format=decode_array_to_formula(array, node_index, num_valid_nodes)
-    array=np.array(array)
-    ltl_spot = _get_spot_format(tuple_string_format)
-    f = spot.formula(ltl_spot)
-    f = spot.simplify(f)
-    ltl_spot = f.__format__("l")
-    ltl_std,r = _get_std_format(ltl_spot.split(' '))
-    new_array = np.zeros_like(array)
-    num_nodes=encode_formula_to_array(encode_formula(ltl_std), LTL_BASE_VOCAB, array)
-    array=jnp.array(array)
-    num_nodes_jax = jnp.asarray(num_nodes)
-    node_index_jax = jnp.asarray(0)  # or whatever node_index result you want
-
-    return array, node_index_jax, num_nodes_jax
-
-def spotify(ltl_formula):
-    ltl_spot = _get_spot_format(ltl_formula)
-    f = spot.formula(ltl_spot)
-    f = spot.simplify(f)
-    ltl_spot = f.__format__("l")
-    # return ltl_spot
-    return f#.to_str('latex')
-
-
-def _get_spot_format(ltl_std):
-    ltl_spot = str(ltl_std).replace("(","").replace(")","").replace(",","")
-    ltl_spot = ltl_spot.replace("'until'","U").replace("'not'","!").replace("'or'","|").replace("'and'","&")
-    ltl_spot = ltl_spot.replace("'next'","X").replace("'eventually'","F").replace("'always'","G").replace("'True'","t").replace("'False'","f").replace("\'","\"")
-    return ltl_spot
-
-def _get_std_format(ltl_spot):
-
-    s = ltl_spot[0]
-    r = ltl_spot[1:]
-
-    if s in ["X","U","&","|"]:
-        v1,r1 = _get_std_format(r)
-        v2,r2 = _get_std_format(r1)
-        if s == "X": op = 'next'
-        if s == "U": op = 'until'
-        if s == "&": op = 'and'
-        if s == "|": op = 'or'
-        return (op,v1,v2),r2
-
-    if s in ["F","G","!"]:
-        v1,r1 = _get_std_format(r)
-        if s == "F": op = 'eventually'
-        if s == "G": op = 'always'
-        if s == "!": op = 'not'
-        return (op,v1),r1
-
-    if s == "f":
-        return 'False', r
-
-    if s == "t":
-        return 'True', r
-
-    if s[0] == '"':
-        return s.replace('"',''), r
-
-    assert False, "Format error in spot2std"
-
-
-
-@jax.jit
-def progress_and_clean_jax(formula_array, truth_assignment, root_index, num_nodes):
+def ltl_tuple_to_string( ltl_tuple):
     """
-    The main JIT-compiled function that orchestrates the workflow.
-    It calls the core JAX logic and then the NumPy callback for simplification.
+    Recursively converts a nested LTL tuple into a human-readable string.
+
+    Args:
+        ltl_tuple: The LTL formula represented as a string (for atomic
+                propositions) or a tuple (for logical operators).
+
+    Returns:
+        A string representation of the LTL formula.
     """
-    # 1. Run the initial JAX-compatible part of your logic
-    dirty_root_idx, dirty_array, dirty_num_nodes = jax_static_iterative_progress_no_copy(
-        formula_array, truth_assignment, root_index, num_nodes
+    
+    # Base Case: If the input is not a tuple, it's an atomic proposition (string).
+    if not isinstance(ltl_tuple, tuple):
+        return str(ltl_tuple)
+
+    # Recursive Step: The input is a tuple, so process the operator.
+    operator = ltl_tuple[0]
+    
+    # --- Unary Operators (1 operand) ---
+    if operator == 'not':
+        # Format: !(operand)
+        operand_str = ltl_tuple_to_string(ltl_tuple[1])
+        return f"!({operand_str})"
+        
+    elif operator == 'eventually':
+        # Format: F(operand)
+        operand_str = ltl_tuple_to_string(ltl_tuple[1])
+        return f"F({operand_str})"
+        
+    elif operator == 'globally':
+        # Format: G(operand)
+        operand_str = ltl_tuple_to_string(ltl_tuple[1])
+        return f"G({operand_str})"
+        
+    elif operator == 'next':
+        # Format: X(operand)
+        operand_str = ltl_tuple_to_string(ltl_tuple[1])
+        return f"X({operand_str})"
+
+    # --- Binary Operators (2 operands) ---
+    elif operator == 'and':
+        # Format: (left & right)
+        left_str = ltl_tuple_to_string(ltl_tuple[1])
+        right_str = ltl_tuple_to_string(ltl_tuple[2])
+        return f"({left_str} & {right_str})"
+        
+    elif operator == 'or':
+        # Format: (left | right)
+        left_str = ltl_tuple_to_string(ltl_tuple[1])
+        right_str = ltl_tuple_to_string(ltl_tuple[2])
+        return f"({left_str} | {right_str})"
+        
+    elif operator == 'until':
+        # Format: (left U right)
+        left_str = ltl_tuple_to_string(ltl_tuple[1])
+        right_str = ltl_tuple_to_string(ltl_tuple[2])
+        return f"({left_str} U {right_str})"
+        
+    # Fallback for any unknown operator
+    else:
+        # Just return the tuple as a string if the operator is not recognized
+        return str(ltl_tuple)
+
+def get_propositions_in_formula(ltl_formula):
+    """
+    Recursively finds all unique propositions (atomic strings)
+    in a formula represented as a nested tuple.
+    """
+    props = set()
+
+    if isinstance(ltl_formula, str):
+        # Is a string, check if it's a proposition
+        if ltl_formula != 'True' and ltl_formula != 'False':
+            props.add(ltl_formula)
+        return props
+
+    if isinstance(ltl_formula, tuple):
+        # Is a tuple, e.g., ('and', 'a', 'b')
+        # The first element is the operator, skip it.
+        # Recursively check all other elements in the tuple.
+        for sub_formula in ltl_formula[1:]:
+            props.update(get_propositions_in_formula(sub_formula))
+
+    return props
+
+
+
+
+# Define a BuilderState to pass through loops
+class BuilderState(NamedTuple):
+    """Holds the state of the graph construction."""
+    node_idx: jnp.ndarray
+    edge_idx: jnp.ndarray
+    nodes: jnp.ndarray
+    senders: jnp.ndarray
+    receivers: jnp.ndarray
+    edge_types: jnp.ndarray
+
+class SingleFormulaState(NamedTuple):
+    """
+    Holds the state for *one* nested 'Until' formula.
+    Used as the input/output for the vmapped function.
+    
+    active_pointers: Boolean array, True if sub-formula at depth `i` is active.
+    to_avoid: Integer array of propositions 'a' in `!a U ...`.
+    to_progress: Integer array of propositions 'b' in `... U (b & ...)`.
+    """
+    active_pointers: jnp.ndarray
+    to_avoid: jnp.ndarray
+    to_progress: jnp.ndarray
+
+class ConjunctionState(NamedTuple):
+    """
+    Holds the batched state for a *conjunction* of N formulas.
+    All arrays are padded to GLOBAL_MAX_DEPTH.
+    
+    active_pointers: (N, GLOBAL_MAX_DEPTH) bool
+    to_avoid: (N, GLOBAL_MAX_DEPTH) int
+    to_progress: (N, GLOBAL_MAX_DEPTH) int
+    depths: (N,) int - The *actual* depth of each formula.
+    already_true: (N,) bool - Mask of formulas that have resolved to True.
+    """
+    active_pointers: jnp.ndarray
+    to_avoid: jnp.ndarray
+    to_progress: jnp.ndarray
+    depths: jnp.ndarray
+    already_true: jnp.ndarray
+
+
+class JaxUntilTaskSampler:
+    """
+    A JAX-based LTL sampler for nested 'Until' formulas.
+
+    This class samples a conjunction of 'Until' tasks and directly
+    encodes them into a JAX-compatible `ConjunctionState` for use
+    with jitted progress functions.
+    """
+    def __init__(self, 
+                 propositions: List[str], 
+                 min_levels: int = 1, 
+                 max_levels: int = 2, 
+                 min_conjunctions: int = 1, 
+                 max_conjunctions: int = 2,
+                ):
+        """
+        Initializes the sampler.
+
+        Args:
+            propositions: List of all available proposition names.
+            min_levels: Minimum nesting depth of a single 'Until' formula.
+            max_levels: Maximum nesting depth (GLOBAL_MAX_DEPTH).
+            min_conjunctions: Minimum number of formulas in the conjunction.
+            max_conjunctions: Maximum number of formulas (GLOBAL_MAX_CONJUNCTIONS).
+        """
+        self.min_levels = int(min_levels)
+        self.max_levels = int(max_levels)
+        self.min_conjunctions = int(min_conjunctions)
+        self.max_conjunctions = int(max_conjunctions)
+        self.propositions = sorted(list(set(propositions)))
+
+        self.LTL_BASE_VOCAB = {
+            "and": 0, "or": 1, "not": 2, "next": 3, "until": 4,
+            "always": 5, "eventually": 6, "True": 7, "False": 8,
+        }
+        
+        self.PROPS_OFFSET = len(self.LTL_BASE_VOCAB)
+        for i, el in enumerate(self.propositions):
+            self.LTL_BASE_VOCAB[el] = self.PROPS_OFFSET + i
+        self.prop_map=self.LTL_BASE_VOCAB
+   
+        
+        # Get all proposition indices as a JAX array for sampling
+        
+        
+        # Calculate the absolute maximum number of propositions we could need
+        self.max_props_needed = 2 * self.max_levels * self.max_conjunctions
+        self.vocab_size = len(self.LTL_BASE_VOCAB)
+        self.feature_size = self.vocab_size + 1 # One-hot + is_root
+
+        self.prop_indices = jnp.arange(len(self.propositions), dtype=jnp.int32)
+        
+        self.EDGE_TYPES = {
+            "self": 0,
+            "arg": 1,    # For unary operators
+            "arg1": 2,   # For binary operator, arg 1
+            "arg2": 3,   # For binary operator, arg 2
+        }
+        # Create the inverse mapping for labeling
+        self.INV_EDGE_TYPES = {v: k for k, v in self.EDGE_TYPES.items()}
+        self.INV_LTL_BASE_VOCAB = {v: k for k, v in self.LTL_BASE_VOCAB.items()}
+        
+
+        self._vmapped_progress = jax.vmap(
+        self._progress_single_formula,
+        in_axes=(SingleFormulaState(0, 0, 0), None, 0),
+        out_axes=(SingleFormulaState(0, 0, 0), 0, 0)
     )
+        # Assert that we have enough unique propositions
+        if self.max_props_needed > len(self.propositions):
+            raise ValueError(
+                f"Not enough propositions! Need at most {self.max_props_needed} "
+                f"(2 * max_levels * max_conjunctions), but only have {len(self.propositions)}."
+            )
 
+    
+   ############################### SAMPLE #######################################################################
+    
+    @partial(jax.jit, static_argnames=['self'])
+    def sample(self, key: PRNGKey) -> ConjunctionState:
+        """
+        Samples a new LTL task and returns its JAX ConjunctionState.
 
-    # 2. Define the shapes and dtypes for the callback's output.
-    #    This is the "contract" that JAX needs to compile the rest of the graph.
-    result_shape_and_dtype = (
-        jax.ShapeDtypeStruct(dirty_array.shape, dirty_array.dtype),
-        jax.ShapeDtypeStruct(dirty_root_idx.shape, dirty_root_idx.dtype),
-        jax.ShapeDtypeStruct(dirty_num_nodes.shape, dirty_num_nodes.dtype),
-    )
+        This function is designed to be JIT-compiled.
 
-    # 3. Call the Python function via jax.pure_callback
-    simplified_array, simplified_root_idx, simplified_num_nodes = jax.pure_callback(
-        simplify_spot, # The Python function to call
-        result_shape_and_dtype,      # The "contract" for the output
-        dirty_array,                 # Arguments to the callback
-        dirty_root_idx,
-        dirty_num_nodes,
-    )
-    return simplified_array, simplified_root_idx, simplified_num_nodes
+        Args:
+            key: A JAX PRNGKey.
 
+        Returns:
+            A `ConjunctionState` tuple containing the encoded formula.
+        """
+        # Define global padding sizes from config
+        N = self.max_conjunctions # Max number of conjunctions
+        M = self.max_levels      # Max nesting depth
+        
+        # Split key for all random operations
+        key, n_conjs_key, depths_key, choice_key = jax.random.split(key, 4)
 
-@jax.jit
-def jax_static_iterative_progress_no_copy(formula_array, truth_assignment, root_index, num_nodes):
-    true_node_idx = num_nodes
-    formula_array = formula_array.at[true_node_idx].set(jnp.array([TRUE_VAL, 0, 0]))
-    num_nodes += 1
+        # 1. Sample the number of *actual* conjunctions
+        n_conjs = jax.random.randint(
+            n_conjs_key, 
+            shape=(), 
+            minval=self.min_conjunctions, 
+            maxval=N + 1 # maxval is exclusive
+        )
+        
+        # 2. Create masks based on the number of conjunctions
+        # (N,) bool: True for active, False for padded
+        conjunction_mask = jnp.arange(N) < n_conjs 
+        # (N,) bool: False for active, True for padded (initial state)
+        already_true = ~conjunction_mask 
+        
+        # 3. Sample depths for all N slots
+        # (N,) int: Sampled depths
+        sampled_depths = jax.random.randint(
+            depths_key, 
+            shape=(N,), 
+            minval=self.min_levels, 
+            maxval=M + 1 # maxval is exclusive
+        )
+        # Use real depths for active conjunctions, dummy depth (e.g., 1) for padded
+        depths = jnp.where(conjunction_mask, sampled_depths, 1)
 
-    false_node_idx = num_nodes
-    formula_array = formula_array.at[false_node_idx].set(jnp.array([FALSE_VAL, 0, 0]))
-    num_nodes += 1
+        # 4. Create initial active_pointers
+        # (N, M) bool: All zeros
+        active_pointers = jnp.zeros((N, M), dtype=bool)
+        
+        # --- THIS IS THE FIX ---
+        # Set the *entire* first column (a static slice [:, 0]) 
+        # to the *dynamic* conjunction_mask. This is JIT-compatible.
+        active_pointers = active_pointers.at[:, 0].set(conjunction_mask)
+        # --- END FIX ---
+        
+        # 5. Sample all propositions needed
+        # We sample enough for the *entire* (N, M) block
+        sampled_indices = jax.random.choice(
+            choice_key, 
+            self.prop_indices, 
+            shape=(self.max_props_needed,), 
+            replace=False
+        )
+        
+        # Reshape into (N, M, 2)
+        all_props = sampled_indices.reshape((N, M, 2))
+        
+        # Separate into full 'to_avoid' and 'to_progress' arrays
+        to_avoid_full = all_props[..., 0]   # (N, M)
+        to_progress_full = all_props[..., 1] # (N, M)
+        
+        # 6. Mask the prop arrays based on actual depths
+        # (N, M) bool: True for slots within the *actual* depth
+        depth_mask = jnp.arange(M) < depths[:, None]
+        
+        # Set all padded slots (outside actual depth) to -1
+        to_avoid = jnp.where(depth_mask, to_avoid_full, -1)
+        to_progress = jnp.where(depth_mask, to_progress_full, -1)
+        
+        # 7. Construct and return the state
+        return ConjunctionState(
+            active_pointers=active_pointers,
+            to_avoid=to_avoid,
+            to_progress=to_progress,
+            depths=depths,
+            already_true=already_true
+        ), n_conjs, jnp.average(sampled_depths)
 
-    results = jnp.full(MAX_NODES, -1, dtype=jnp.int32)
-    stack = jnp.zeros((MAX_NODES, 2), dtype=jnp.int32)
-    stack_ptr = 0
-    stack = stack.at[stack_ptr].set(jnp.array([root_index, 0]))
-    stack_ptr += 1
+    @partial(jax.jit, static_argnames=['self'])
+    def _progress_single_formula(
+        self,
+        state: SingleFormulaState,
+        current_props: jnp.ndarray,
+        depth: jnp.ndarray # The *actual* depth of this formula
+    ) -> Tuple[SingleFormulaState, jnp.ndarray, jnp.ndarray]:
+        """
+        Progresses a *single* nested 'Until' formula.
+        This function is designed to be vmapped.
+        """
+        MAX_DEPTH = state.to_avoid.shape[0] # This is the GLOBAL_MAX_DEPTH
+        new_active = jnp.zeros(MAX_DEPTH, dtype=bool)
+        is_true_overall = jnp.array(False)
+    
+        for i in range(MAX_DEPTH):
+            # --- 1. 'Stays Active' (from active_pointers[i]) ---
+            is_active_i = state.active_pointers[i]
+            phi_progresses_i = ~current_props[state.to_avoid[i]]
+            stays_active = is_active_i & phi_progresses_i
+    
+            # --- 2. 'Gets Activated' (from active_pointers[i-1]) ---
+            gets_activated = jnp.array(False)
+            if i > 0:
+                is_active_prev = state.active_pointers[i-1]
+                psi_progresses_prev = current_props[state.to_progress[i-1]]
+                gets_activated = is_active_prev & psi_progresses_prev
+    
+            new_active = new_active.at[i].set(stays_active | gets_activated)
+    
+            # --- 3. Check for immediate 'True' satisfaction ---
+            # This now uses the 'depth' argument to check at the correct level.
+            is_last_real_prop = (i == depth - 1)
+            is_active_at_depth = state.active_pointers[i]
+            psi_progresses_at_depth = current_props[state.to_progress[i]]
+            
+            # If this is the last *real* proposition for this formula,
+            # and it's active and its 'psi' progresses, the formula resolves to True.
+            becomes_true = is_active_at_depth & psi_progresses_at_depth & is_last_real_prop
+            is_true_overall = is_true_overall | becomes_true
+    
+        # The entire formula is False if no branches are active in the new state
+        # AND it didn't just become True.
+        is_false_overall = ~jnp.any(new_active) & ~is_true_overall
+    
+        # If formula resolved to True or False, clear all active pointers.
+        # This prevents resolved formulas from progressing further.
+        final_active_pointers = lax.cond(
+            is_true_overall | is_false_overall,
+            lambda: jnp.zeros_like(new_active),
+            lambda: new_active
+        )
+        new_state = state._replace(active_pointers=final_active_pointers)
+        
+        return new_state, is_true_overall, is_false_overall
+    
+    # --- Vmapped and Public Functions ---
+    
+    # Create a vmapped version of the single-formula progress function.
+    # We map over:
+    #   - SingleFormulaState (all fields, axis 0)
+    #   - current_props (None, broadcast)
+    #   - depths (axis 0)
+    
+    @partial(jax.jit, static_argnames=['self'])
+    def progress(
+        self, 
+        state: ConjunctionState,
+        current_props: jnp.ndarray
+    ) -> Tuple[ConjunctionState, jnp.ndarray, jnp.ndarray]:
+        """
+        Progresses an entire conjunction of N formulas in parallel.
+        """
+        
+        # 1. Create a mask of tasks that are *still progressing*
+        #    (i.e., not already True).
+        progressing_mask = ~state.already_true # Shape (N,)
+    
+        # 2. We only want to progress tasks that are still progressing.
+        #    We "mask" the input `active_pointers`.
+        #    `active_pointers` for non-progressing tasks are set to all-False.
+        input_active_pointers = state.active_pointers * jnp.expand_dims(progressing_mask, -1)
+        
+        vmap_input_state = SingleFormulaState(
+            input_active_pointers, state.to_avoid, state.to_progress
+        )
+    
+        # 3. Run the vmapped progress function
+        vmap_output_state, is_true_this_step, is_false_this_step = \
+            self._vmapped_progress(vmap_input_state, current_props, state.depths)
+        
+        # 4. Update the `already_true` mask
+        # A task is now true if it was *already* true OR it *just became* true.
+        new_already_true = state.already_true | is_true_this_step
+        
+        # 5. Determine overall conjunction status
+        # Conjunction is False if any *progressing* task *just became* False.
+        is_false_overall = jnp.any(is_false_this_step)
+        
+        # Conjunction is True if *all* tasks are now in the `already_true` state.
+        is_true_overall = jnp.all(new_already_true)
+        
+        # 6. Create the new state.
+        # The new `active_pointers` are what vmap returned.
+        # (Tasks that just finished are zeroed by `_progress_single_formula`).
+        # (Tasks that *were* finished were zeroed on input).
+        new_conjunction_state = ConjunctionState(
+            active_pointers=vmap_output_state.active_pointers,
+            to_avoid=state.to_avoid,
+            to_progress=state.to_progress,
+            depths=state.depths,
+            already_true=new_already_true
+        )
+        is_false_overall = jnp.any(is_false_this_step & progressing_mask)
+        
+        return new_conjunction_state, is_true_overall, is_false_overall
 
-    init_state = (formula_array, results, stack, stack_ptr, num_nodes, true_node_idx, false_node_idx)
-
-    def main_loop_body(i, state):
-        fa, res, st, sp, nn, true_idx, false_idx = state
-
-        def process_stack_top(carry):
-            fa, res, st, sp, nn, t_idx, f_idx = carry
-            sp -= 1
-            node_index, processed = st[sp]
-            op, left_idx, right_idx = fa[node_index]
-
-            is_atomic = (left_idx == 0) & (right_idx == 0) & ~(IS_UNARY_OP[op] | IS_BINARY_OP[op])
-
-
-            def compute_node(compute_carry):
-                fa, res, st, sp, nn, t_idx, f_idx = compute_carry
-
-                def process_parent(parent_carry):
-                    fa, res, st, sp, nn, t_idx, f_idx = parent_carry
-
-                    def handle_unary(unary_carry):
-                        fa_u, res_u, nn_u, sp_u = unary_carry
-                        child_res_idx = res_u[left_idx]
-                        child_res_val = fa_u[child_res_idx, 0]
-
-                        def case_not(c):
-                            res = c[0]
-                            res_idx = jnp.where(child_res_val == TRUE_VAL, f_idx, t_idx)
-                            return res.at[node_index].set(res_idx)
-
-                        def case_next(c):
-                            res = c[0]
-                            return res.at[node_index].set(child_res_idx)
-
-                        def case_temporal(op_val, c):
-                            fa, res, nn = c
-                            new_fa = fa.at[nn].set(jnp.array([op_val, node_index, child_res_idx]))
-                            return res.at[node_index].set(nn), new_fa, nn + 1
-
-                        res = lax.cond(
-                            op == LTL_BASE_VOCAB["not"], case_not,
-                            lambda c: lax.cond(op == LTL_BASE_VOCAB["next"], case_next, lambda x: x[0], c),
-                            (res_u,)
-                        )
-                        res, fa, nn = lax.cond(
-                            op == LTL_BASE_VOCAB["always"], lambda c: case_temporal(LTL_BASE_VOCAB["and"], c),
-                            lambda c: lax.cond(
-                                op == LTL_BASE_VOCAB["eventually"], lambda c2: case_temporal(LTL_BASE_VOCAB["or"], c2),
-                                lambda c3: (c3[1], c3[0], c3[2]), c), # (res, fa, nn)
-                            (fa_u, res, nn_u)
-                        )
-                        return fa, res, st, sp, nn, t_idx, f_idx
-
-                    def handle_binary(binary_carry):
-                        fa_b, res_b, nn_b, sp_b = binary_carry
-                        left_res_idx, right_res_idx = res_b[left_idx], res_b[right_idx]
-                        left_res_val, right_res_val = fa_b[left_res_idx, 0], fa_b[right_res_idx, 0]
-
-                        def handle_and_or(carry):
-                            fa_ao, res_ao, nn_ao, sp_ao = carry
-                            is_and = op == LTL_BASE_VOCAB["and"]
-                            term_val = jnp.where(is_and, FALSE_VAL, TRUE_VAL)
-                            ident_val = jnp.where(is_and, TRUE_VAL, FALSE_VAL)
-
-                            def make_new_op_node(c):
-                                fa, nn = c
-                                new_fa = fa.at[nn].set(jnp.array([op, left_res_idx, right_res_idx]))
-                                return new_fa, nn + 1, nn
-
-                            is_term = (left_res_val == term_val) | (right_res_val == term_val)
-                            res_idx = jnp.where(is_and, f_idx, t_idx)
-
-                            fa, nn, res_idx = lax.cond(
-                               is_term, lambda c: (c[0],c[1], res_idx),
-                               lambda c: lax.cond( (left_res_val==ident_val) & (right_res_val==ident_val), lambda c2: (c2[0],c2[1], jnp.where(is_and, t_idx, f_idx)),
-                               lambda c2: lax.cond( left_res_val==ident_val, lambda c3: (c3[0],c3[1],right_res_idx),
-                               lambda c3: lax.cond( right_res_val==ident_val, lambda c4: (c4[0],c4[1],left_res_idx), make_new_op_node,c3),c2),c),
-                               (fa_ao, nn_ao))
-
-                            res = res_ao.at[node_index].set(res_idx)
-                            return fa, res, st, sp, nn, t_idx, f_idx
-
-                        def handle_until(carry):
-                            fa_u, res_u, nn_u, sp_u = carry
-
-                            def make_and_for_f1(c):
-                                fa, nn = c
-                                new_fa = fa.at[nn].set(jnp.array([LTL_BASE_VOCAB["and"], left_res_idx, node_index]))
-                                return new_fa, nn + 1, nn
-
-                            fa, nn, f1_idx = lax.cond(
-                                left_res_val == FALSE_VAL, lambda c: (c[0], c[1], f_idx),
-                                lambda c: lax.cond(left_res_val == TRUE_VAL, lambda c2: (c2[0], c2[1], node_index), make_and_for_f1, c),
-                                (fa_u, nn_u))
-
-                            def make_or_for_final(c):
-                                fa_in, nn_in = c
-                                new_fa = fa_in.at[nn_in].set(jnp.array([LTL_BASE_VOCAB["or"], right_res_idx, f1_idx]))
-                                return new_fa, nn_in + 1, nn_in
-
-                            fa, nn, final_res_idx = lax.cond(
-                                right_res_val == TRUE_VAL, lambda c: (c[0], c[1], t_idx),
-                                lambda c: lax.cond(right_res_val == FALSE_VAL, lambda c2: (c2[0], c2[1], f1_idx), make_or_for_final, c),
-                                (fa, nn))
-
-                            res = res_u.at[node_index].set(final_res_idx)
-                            return fa, res, st, sp, nn, t_idx, f_idx
-
-                        return lax.cond(
-                            (op == LTL_BASE_VOCAB["and"]) | (op == LTL_BASE_VOCAB["or"]),
-                            handle_and_or,
-                            handle_until,
-                            binary_carry
-                        )
-
-                    return lax.cond(
-                        IS_UNARY_OP[op],
-                        handle_unary,
-                        handle_binary,
-                        (fa, res, nn, sp)
+    
+    
+    
+    
+    
+    ###################################### AST TREE ###############################################################
+    @partial(jax.jit, static_argnames=['self'])
+    def _one_hot_base(self, token_id: jnp.ndarray) -> jnp.ndarray:
+        return jax.nn.one_hot(token_id, self.vocab_size, dtype=jnp.float32)
+    @partial(jax.jit, static_argnames=['self'])
+    def _add_node(
+        self,
+        builder_state: BuilderState, 
+        token_id: jnp.ndarray
+    ) -> Tuple[BuilderState, jnp.ndarray]:
+        """
+        Adds a node to the graph buffers and returns its index.
+        The 'is_root' flag (last feature) defaults to 0.0.
+        """
+        idx = builder_state.node_idx
+        
+        # Create base features
+        base_features = self._one_hot_base(token_id)
+        
+        # Create the 'is_root' feature, defaulting to 0.0
+        is_root_feature = jnp.array([0.0], dtype=jnp.float32)
+        
+        # Concat base features and is_root feature
+        node_feature_vector = jnp.concatenate(
+            [base_features, is_root_feature], 
+            axis=0
+        )
+        
+        # Add node feature
+        nodes = builder_state.nodes.at[idx].set(node_feature_vector)
+        
+        # Add self-loop edge
+        senders = builder_state.senders.at[builder_state.edge_idx].set(idx)
+        receivers = builder_state.receivers.at[builder_state.edge_idx].set(idx)
+        edge_types = builder_state.edge_types.at[builder_state.edge_idx].set(self.EDGE_TYPES["self"])
+        
+        new_state = builder_state._replace(
+            node_idx=idx + 1,
+            edge_idx=builder_state.edge_idx + 1,
+            nodes=nodes,
+            senders=senders,
+            receivers=receivers,
+            edge_types=edge_types
+        )
+        return new_state, idx
+    @partial(jax.jit, static_argnames=['self'])
+    def _add_edge(
+        self,
+        builder_state: BuilderState, 
+        sender: jnp.ndarray, 
+        receiver: jnp.ndarray, 
+        edge_type: int
+    ) -> BuilderState:
+        """Adds a directional edge to the graph buffers."""
+        idx = builder_state.edge_idx
+        senders = builder_state.senders.at[idx].set(sender)
+        receivers = builder_state.receivers.at[idx].set(receiver)
+        edge_types = builder_state.edge_types.at[idx].set(edge_type)
+        
+        return builder_state._replace(
+            edge_idx=idx + 1,
+            senders=senders,
+            receivers=receivers,
+            edge_types=edge_types
+        )
+    @partial(jax.jit, static_argnames=['self'])
+    def _build_binary_tree(
+        self,
+        builder_state: BuilderState,
+        leaf_indices: jnp.ndarray,
+        leaf_mask: jnp.ndarray,
+        op_token: int,
+    ) -> Tuple[BuilderState, jnp.ndarray]:
+        """
+        Builds a JAX-native binary tree (like _build_tree) from a list of leaf node indices.
+        
+        Returns:
+            (new_builder_state, root_node_index)
+            Returns root_node_index = -1 if there are 0 active leaves.
+        """
+        
+        # --- 1. Filter active leaf indices ---
+        active_indices = jnp.where(leaf_mask, leaf_indices, -1)
+        is_active = (active_indices != -1)
+        active_count = jnp.sum(is_active)
+        sorted_indices = jnp.argsort(jnp.where(is_active, jnp.arange(leaf_mask.shape[0]), leaf_mask.shape[0]))
+        
+        # Statically-sized array, active indices at the front.
+        compressed_leaves = active_indices[sorted_indices]
+    
+        # --- 2. Build the binary tree from the compressed list ---
+        
+        # --- THIS IS THE FIX ---
+        # The signature must be (loop_index, carry_state)
+        def build_tree_recursive(
+            start_idx: int,                          # loop_index 'i'
+            state: Tuple[BuilderState, jnp.ndarray]  # carry_state 'val'
+        ) -> Tuple[BuilderState, jnp.ndarray]:
+        # --- END FIX ---
+            """Iteratively combines leaf nodes under an operation."""
+            builder_state, root_idx = state
+            right_child_idx = compressed_leaves[start_idx]
+            
+            # Add new parent node (is_root defaults to 0.0)
+            builder_state, new_root_idx = self._add_node(builder_state, jnp.array(op_token))
+            
+            # Add edges: child -> parent
+            builder_state = self._add_edge(builder_state, root_idx, new_root_idx, self.EDGE_TYPES["arg1"])
+            builder_state = self._add_edge(builder_state, right_child_idx, new_root_idx, self.EDGE_TYPES["arg2"])
+            
+            return (builder_state, new_root_idx)
+    
+        # --- 3. Handle 0, 1, or N active leaves ---
+        def case_zero():
+            # *** MODIFIED ***
+            # 0 active leaves. Do not create a True/False node.
+            # Return a null index (-1) and the unmodified state.
+            return builder_state, jnp.array(-1)
+    
+        def case_one():
+            # One leaf, just return its index. No new nodes.
+            root_idx = compressed_leaves[0]
+            return builder_state, root_idx
+    
+        def case_many():
+            # N > 1 leaves. Build the binary tree.
+            initial_root_idx = compressed_leaves[0]
+            initial_state = (builder_state, initial_root_idx)
+            
+            final_state, final_root_idx = lax.fori_loop(
+                1, 
+                active_count, 
+                build_tree_recursive, # This function now has the correct signature
+                initial_state
+            )
+            return final_state, final_root_idx
+    
+        # Main logic
+        branch_index = jnp.minimum(active_count, 2)
+        
+        return lax.switch(
+            branch_index,
+            [case_zero, case_one, case_many]
+        )
+    @partial(jax.jit, static_argnames=['self'])
+    def _build_subformula_until(
+        self,
+        builder_state: BuilderState,
+        avoid_props: jnp.ndarray,
+        prog_props: jnp.ndarray,
+        formula_depth: jnp.ndarray,
+        start_depth: jnp.ndarray
+    ) -> Tuple[BuilderState, jnp.ndarray]:
+        """
+        Builds the static AST for a *single* sub-formula:
+        !avoid[i] U (prog[i] & (!avoid[i+1] U (...)))
+        """
+        
+        # 1. Build the innermost (base case) formula
+        last_idx = formula_depth - 1
+        
+        b_state, until_idx = self._add_node(builder_state, jnp.array(self.LTL_BASE_VOCAB["until"]))
+        b_state, not_idx = self._add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["not"]))
+        
+        avoid_token = avoid_props[last_idx] + self.PROPS_OFFSET
+        b_state, avoid_idx = self._add_node(b_state, avoid_token)
+        
+        prog_token = prog_props[last_idx] + self.PROPS_OFFSET
+        b_state, prog_idx = self._add_node(b_state, prog_token)
+        
+        b_state = self._add_edge(b_state, not_idx, until_idx, self.EDGE_TYPES["arg1"])
+        b_state = self._add_edge(b_state, prog_idx, until_idx, self.EDGE_TYPES["arg2"])
+        b_state = self._add_edge(b_state, avoid_idx, not_idx, self.EDGE_TYPES["arg"])
+        
+        current_root_idx = until_idx
+    
+        # 2. Loop to wrap the formula outwards
+        def wrap_loop_body(m, state):
+            b_state, current_root_idx = state
+            
+            b_state, new_until_idx = self._add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["until"]))
+            b_state, new_not_idx = self._add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["not"]))
+            
+            avoid_token = avoid_props[m] + self.PROPS_OFFSET
+            b_state, new_avoid_idx = self._add_node(b_state, avoid_token)
+            
+            b_state, new_and_idx = self._add_node(b_state, jnp.array(self.LTL_BASE_VOCAB["and"]))
+            
+            prog_token = prog_props[m] + self.PROPS_OFFSET
+            b_state, new_prog_idx = self._add_node(b_state, prog_token)
+            
+            b_state = self._add_edge(b_state, new_not_idx, new_until_idx, self.EDGE_TYPES["arg1"])
+            b_state = self._add_edge(b_state, new_and_idx, new_until_idx, self.EDGE_TYPES["arg2"])
+            b_state = self._add_edge(b_state, new_avoid_idx, new_not_idx, self.EDGE_TYPES["arg"])
+            b_state = self._add_edge(b_state, new_prog_idx, new_and_idx, self.EDGE_TYPES["arg1"])
+            b_state = self._add_edge(b_state, current_root_idx, new_and_idx, self.EDGE_TYPES["arg2"])
+            
+            return (b_state, new_until_idx)
+    
+        # Re-parametrizing for lax.fori_loop (which increments)
+        def loop_wrapper(i, state):
+            m = (formula_depth - 2) - i
+            return wrap_loop_body(m, state)
+    
+        n_wraps = (formula_depth - 1) - start_depth
+        
+        final_state, final_root_idx = lax.cond(
+            n_wraps > 0,
+            lambda: lax.fori_loop(0, n_wraps, loop_wrapper, (b_state, current_root_idx)),
+            lambda: (b_state, current_root_idx)
+        )
+    
+        return final_state, final_root_idx
+    
+    @partial(jax.jit, static_argnames=['self'])
+    def _build_formula_or_tree(self, 
+        builder_state: BuilderState,
+        formula_idx: int,
+        state: ConjunctionState
+    ) -> Tuple[BuilderState, jnp.ndarray]:
+        """
+        Builds the 'OR' tree for a single formula 'n'.
+        
+        *** MODIFIED ***
+        Returns root_node_index = -1 if formula is 'True' or 'False'.
+        """
+        M = state.active_pointers.shape[1]
+        
+        is_already_true = state.already_true[formula_idx]
+        active_mask = state.active_pointers[formula_idx] # (M,) bool
+        is_false = ~jnp.any(active_mask) & ~is_already_true
+        
+        avoid_props = state.to_avoid[formula_idx]
+        prog_props = state.to_progress[formula_idx]
+        formula_depth = state.depths[formula_idx]
+    
+        # --- 1. Handle simple TRUE/FALSE cases ---
+        def case_true():
+            # *** MODIFIED ***
+            # Do not add a node. Return null index.
+            return builder_state, jnp.array(-1)
+    
+        def case_false():
+            # *** MODIFIED ***
+            # Do not add a node. Return null index.
+            return builder_state, jnp.array(-1)
+    
+        # --- 2. Handle active (OR) case ---
+        def case_active():
+            # Use lax.scan to iterate over all possible start_depths (0..M-1).
+            def scan_body(carry_state, m):
+                b_state = carry_state
+                is_active = active_mask[m] & (m < formula_depth)
+                
+                def build_it():
+                    return self._build_subformula_until(
+                        b_state, avoid_props, prog_props, formula_depth, m
                     )
-
-                def push_children(pre_carry):
-                    fa, res, st, sp, nn, t_idx, f_idx = pre_carry
-                    st = st.at[sp].set(jnp.array([node_index, 1]))
-                    sp += 1
-                    st, sp = lax.cond(IS_BINARY_OP[op], lambda c: (c[0].at[c[1]].set(jnp.array([right_idx, 0])), c[1] + 1), lambda c: c, (st, sp))
-                    st = st.at[sp].set(jnp.array([left_idx, 0]))
-                    sp += 1
-                    return fa, res, st, sp, nn, t_idx, f_idx
-
-                return lax.cond(processed == 1, process_parent, push_children, compute_carry)
-
-            def process_atomic(atomic_carry):
-                fa, res, st, sp, nn, t_idx, f_idx = atomic_carry
-                is_true = jnp.any(op == truth_assignment)
-                prop_res = jnp.where(is_true, t_idx, f_idx)
-                final_res = jnp.where(op == TRUE_VAL, t_idx, jnp.where(op == FALSE_VAL, f_idx, prop_res))
-                return fa, res.at[node_index].set(final_res), st, sp, nn, t_idx, f_idx
-
-            return lax.cond(
-                res[node_index] != -1, lambda x: x,
-                lambda y: lax.cond(is_atomic, process_atomic, compute_node, y),
-                (fa, res, st, sp, nn, true_idx, false_idx)
+                
+                def dont_build_it():
+                    return b_state, jnp.array(-1)
+    
+                b_state, root_idx = lax.cond(
+                   is_active,
+                    build_it,
+                    dont_build_it
+                )
+                
+                final_root_idx = jnp.where(is_active, root_idx, -1)
+                return b_state, final_root_idx
+    
+            # Run the scan.
+            final_b_state, all_leaf_indices = lax.scan(
+                scan_body,
+                builder_state,
+                jnp.arange(M)
             )
-
-        return lax.cond(sp > 0, process_stack_top, lambda x: x, state)
-
-    final_state = lax.fori_loop(0, MAX_NODES * 2, main_loop_body, init_state)
-    final_fa, final_res, _, _, final_nn, _, _ = final_state
-
-    return final_res[root_index], final_fa, final_nn
-
-"""# AST"""
-
-import jax
-import jax.numpy as jnp
-import numpy as np
-from functools import partial
-from typing import Callable, List, NamedTuple, Optional
-from collections import namedtuple, OrderedDict
-
-edge_types = {"self": 0, "arg": 1, "arg1": 2, "arg2": 3}
-NUM_EDGE_TYPES = len(edge_types)
-
-
-
-
-class JaxASTBuilder:
-    """
-    Builds a GNN-compatible graph representation from an LTL formula array.
-    This version is designed to be fully JAX-compilable and compatible with
-    jax.ops.segment_sum by using a dedicated padding node at index 0.
-    """
-    def __init__(self, vocab_size: int, max_formula_nodes: int):
-        self.vocab_size = vocab_size
-        # The total number of nodes in the graph is max_formula_nodes + 1 (for the padding node)
-        self.max_graph_nodes = max_formula_nodes + 1
-        self.max_formula_nodes = max_formula_nodes
-
-
-    """Creates and JIT-compiles the static graph building function."""
-    @staticmethod
-    @partial(jax.jit, static_argnames=['max_formula_nodes', 'vocab_size', 'max_graph_nodes'])
-    def _build_graph_static(encoded_array, num_nodes: int, max_formula_nodes: int, vocab_size: int, max_graph_nodes: int):
+            
+            # Create an 'OR' tree from the resulting leaf indices.
+            active_leaf_mask = (all_leaf_indices != -1)
+            
+            # This will hit case_one() or case_many().
+            # It will NOT hit case_zero() because is_false check
+            # in the outer switch already handled the 0-active-pointer case.
+            return self._build_binary_tree(
+                final_b_state,
+                all_leaf_indices,
+                active_leaf_mask,
+                self.LTL_BASE_VOCAB["or"]
+            )
+    
+        # --- 3. Main Switch ---
+        branch_index = jnp.where(is_already_true, 0, jnp.where(is_false, 1, 2))
+        
+        return lax.switch(
+            branch_index,
+            [case_true, case_false, case_active]
+        )
+    
+    
+    @partial(jax.jit, static_argnames=['self'])
+    def build_ast(self, state: ConjunctionState) -> OrderedDict:
         """
-        JIT-compiled static method to construct the graph.
-        This function returns PADDED graph arrays compatible with segment_sum.
-        - Node 0 is a dedicated padding node.
-        - Real formula nodes are indexed from 1 to num_nodes.
-        - Padded edges are self-loops on node 0.
+        JIT-compilable function to convert a ConjunctionState into a binary AST graph.
+        
+        The graph is returned in a JAX-friendly OrderedDict (GraphTuple) format
+        with statically-sized buffers.
+        
+        The last feature of the node tensor is 'is_root'.
+        
+        *** MODIFIED ***
+        This function no longer creates nodes for 'True' or 'False'.
+        If the entire formula resolves to True/False, the graph will be empty
+        (n_node=1 for padding) and no node will be marked as root.
         """
-        # === 1. Node Feature Construction ===
-        # We have max_graph_nodes = max_formula_nodes + 1 total nodes. Node 0 is for padding.
-        node_tokens = encoded_array[:max_formula_nodes, 0]
-        one_hot_features = jax.nn.one_hot(node_tokens, num_classes=vocab_size, dtype=jnp.float32)
+        
+        N, M = state.active_pointers.shape
+        
+        # --- 1. Define Conservative Static Buffer Sizes ---
+        MAX_NODES_PER_UNTIL_TREE = 5 * M - 1 
+        MAX_NODES_PER_FORMULA = (M - 1) + (M * MAX_NODES_PER_UNTIL_TREE) + 1
+        MAX_NODES = 1 + (N - 1) + (N * MAX_NODES_PER_FORMULA)
+        MAX_EDGES = MAX_NODES * 3
+    
+        # --- 2. Initialize Buffers ---
+        nodes = jnp.zeros((MAX_NODES, self.feature_size), dtype=jnp.float32)
+        senders = jnp.full((MAX_EDGES,), 0, dtype=jnp.int32)
+        receivers = jnp.full((MAX_EDGES,), 0, dtype=jnp.int32)
+        edge_types = jnp.full((MAX_EDGES,),self.EDGE_TYPES["self"], dtype=jnp.int32)
+    
+        builder_state = BuilderState(
+            node_idx=jnp.array(1),
+            edge_idx=jnp.array(0),
+            nodes=nodes,
+            senders=senders,
+            receivers=receivers,
+            edge_types=edge_types
+        )
+        
+    
+        # --- 4. Build the 'AND' tree of all N formulas ---
+        def global_and_scan_body(carry_state, n):
+            b_state = carry_state
+            
+            # This now returns -1 for True/False formulas
+            b_state, formula_root_idx = self._build_formula_or_tree(b_state, n, state)
+            
+            return b_state, formula_root_idx
+    
+        final_b_state, all_formula_leaf_indices = lax.scan(
+            global_and_scan_body,
+            builder_state,
+            jnp.arange(N)
+        )
+    
+        # --- 5. Build the final 'AND' tree from the formula roots ---
+        
+        # *** MODIFIED ***
+        # The mask is now based on which indices are *not* null (-1).
+        valid_leaf_mask = (all_formula_leaf_indices != -1)
+        
+        # This builds the final 'AND' tree.
+        # If valid_leaf_mask is all False, this returns global_root_idx = -1
+        final_b_state, global_root_idx = self._build_binary_tree(
+            final_b_state,
+            all_formula_leaf_indices,
+            valid_leaf_mask, # The modified mask
+            self.LTL_BASE_VOCAB["and"]
+        )
+        
+        # --- 6. Set the 'is_root' flag on the global root node ---
+        
+        # *** MODIFIED ***
+        # Only set the 'is_root' flag if the global_root_idx is valid (not -1).
+        final_nodes = lax.cond(
+            global_root_idx != -1,
+            lambda: final_b_state.nodes.at[global_root_idx, -1].set(1.0),
+            lambda: final_b_state.nodes
+        )
+        
+        # --- 7. Finalize and Return GraphTuple ---
+        final_n_node = final_b_state.node_idx
+        final_n_edge = final_b_state.edge_idx
+        
+        return OrderedDict([
+            ('nodes', final_nodes), # Use the conditionally updated nodes
+            ('senders', final_b_state.senders),
+            ('receivers', final_b_state.receivers),
+            ('n_node', final_n_node.reshape(1)),
+            ('n_edge', final_n_edge.reshape(1)),
+            ('edge_types', final_b_state.edge_types)
+        ])
 
-        # Initialize all node features to zero, including the padding node at index 0.
-        node_features = jnp.zeros((max_graph_nodes, vocab_size), dtype=jnp.float32)
-        # Place the one-hot features for the real nodes starting from index 1.
-        node_features = node_features.at[1:].set(one_hot_features)
+    
+    
+    
+    ##################################### DECODE #############################################################
+    
 
-        # Mask out features for padded formula nodes (beyond num_nodes).
-        # The mask starts from index 1, as node 0 is always a padding node.
-        valid_node_mask = jnp.arange(max_graph_nodes) < (num_nodes + 1)
-        node_features = node_features * valid_node_mask[:, None]
-
-        # The root is now at index 1.
-        is_root_feature = jnp.zeros((max_graph_nodes, 1), dtype=jnp.float32).at[1].set(1.0)
-        node_features = jnp.concatenate([node_features, is_root_feature], axis=-1)
-
-        # === 2. Edge Construction Loop ===
-        def edge_construction_body(i, carry):
-            senders, receivers, edge_type_indices = carry
-            op, left_idx, right_idx = encoded_array[i]
-
-            # **MODIFIED**: Shift all node indices by +1 to account for the padding node.
-            current_node_idx = i + 1
-            left_child_idx = left_idx + 1
-            right_child_idx = right_idx + 1
-
-            # Self-loop for the current real node.
-            senders = senders.at[3 * i].set(current_node_idx)
-            receivers = receivers.at[3 * i].set(current_node_idx)
-            edge_type_indices = edge_type_indices.at[3 * i].set(edge_types['self'])
-
-            # Unary op
-            def unary_true_fn(vals):
-                s, r, e = vals
-                s = s.at[3 * i + 1].set(left_child_idx)
-                r = r.at[3 * i + 1].set(current_node_idx)
-                e = e.at[3 * i + 1].set(edge_types['arg'])
-                return s, r, e
-            senders, receivers, edge_type_indices = jax.lax.cond(
-                IS_UNARY_OP[op], unary_true_fn, lambda vals: vals, (senders, receivers, edge_type_indices)
+    def decode_formula(self, 
+        state: ConjunctionState, 
+    ) -> Any:
+        """
+        Decodes a JAX ConjunctionState back into a human-readable Python tuple.
+        
+        This represents the *current* state, handling 'ORs' from active pointers.
+        """
+        
+        def _build_tree(op: str, clauses: List[Any]) -> Any:
+            """Recursively builds a nested 'and' or 'or' tuple tree."""
+            if not clauses:
+                return 'True' if op == 'and' else 'False'
+            if len(clauses) == 1:
+                return clauses[0]
+            return (op, clauses[0], _build_tree(op, clauses[1:]))
+       
+        def _reconstruct_single_formula(
+            avoid_arr: jnp.ndarray, 
+            prog_arr: jnp.ndarray, 
+            depth: int, 
+        ) -> Any:
+            """Helper to rebuild the *original* nested tuple from JAX arrays."""
+            avoid_arr=np.array(avoid_arr)
+            prog_arr=np.array(prog_arr)
+            # Start from the innermost formula
+            # !avoid[depth-1] U prog[depth-1]
+            curr = ('until', 
+                    ('not', self.propositions[avoid_arr[depth-1]]), 
+                    self.propositions[prog_arr[depth-1]])
+            
+            # Wrap it outwards
+            for i in range(depth - 2, -1, -1):
+                # !(avoid[i]) U (prog[i] & curr)
+                curr = ('until',
+                        ('not', self.propositions[avoid_arr[i]]),
+                        ('and', self.propositions[prog_arr[i]], curr))
+            return curr
+        
+        num_conjunctions = state.depths.shape[0]
+        final_conjunctions = []
+    
+        for n in range(num_conjunctions):
+            if state.already_true[n]:
+    
+                continue
+                
+            depth = int(state.depths[n])
+            
+            # Reconstruct the original full formula for this index
+            original_formula = _reconstruct_single_formula(
+                state.to_avoid[n], state.to_progress[n], depth,
             )
-
-            # Binary op
-            def binary_true_fn(vals):
-                s, r, e = vals
-                s = s.at[3 * i + 1].set(left_child_idx)
-                r = r.at[3 * i + 1].set(current_node_idx)
-                e = e.at[3 * i + 1].set(edge_types['arg1'])
-                s = s.at[3 * i + 2].set(right_child_idx)
-                r = r.at[3 * i + 2].set(current_node_idx)
-                e = e.at[3 * i + 2].set(edge_types['arg2'])
-                return s, r, e
-            senders, receivers, edge_type_indices = jax.lax.cond(
-                IS_BINARY_OP[op], binary_true_fn, lambda vals: vals, (senders, receivers, edge_type_indices)
+            
+            # Find which sub-formulas are active
+            active_indices = jnp.where(state.active_pointers[n, :depth])[0]
+            
+            if active_indices.shape[0] == 0:
+                return 'False'
+    
+            # Create an 'OR' list of all active sub-formulas
+            or_clauses = []
+            for start_depth in active_indices.tolist():
+                # "Drill down" to the correct sub-formula
+                sub_formula = original_formula
+                for _ in range(start_depth):
+                    # ('until', A, ('and', B, Rest)) -> get Rest
+                    sub_formula = sub_formula[2][2]
+                or_clauses.append(sub_formula)
+                
+            final_conjunctions.append(_build_tree('or', or_clauses))
+            
+        # Combine all conjunctions with 'AND'
+        return ltl_tuple_to_string(_build_tree('and', final_conjunctions))
+    
+    
+#########################     ENCODE ########################################################################################
+    
+  
+    
+    def encode_formula(self, 
+        ltl_tuple: Union[tuple, str],
+    ) -> ConjunctionState:
+        """
+        Encodes a Python tuple representation of LTL formulas into a JAX ConjunctionState.
+        
+        Handles:
+        - 'True', 'False'
+        - A single 'until' formula (fresh)
+        - A single 'or' formula (progressed state)
+        - An 'and' of the above
+        """
+       
+        def _parse_single_until(
+            formula_tuple: tuple,  
+        ) -> Tuple[ jnp.ndarray, jnp.ndarray, int]:
+            """Parses one !(a) U (b & !(c) U d) formula into JAX arrays."""
+            to_avoid_list = []
+            to_progress_list = []
+            curr = formula_tuple
+            
+            depth = 0
+            while True:
+                depth += 1
+                # ('until', ('not', A), B)
+                _, not_a, b_and_rest = curr
+                
+                # A = ('not', prop)
+                avoid_prop = not_a[1]
+                to_avoid_list.append(self.prop_map[avoid_prop])
+                
+                # B = ('and', prop, rest_formula)
+                if isinstance(b_and_rest, tuple) and b_and_rest[0] == 'and':
+                    _, progress_prop, rest_formula = b_and_rest
+                    to_progress_list.append(self.prop_map[progress_prop])
+                    curr = rest_formula
+                # B = prop (base case)
+                else:
+                    progress_prop = b_and_rest
+                    to_progress_list.append(self.prop_map[progress_prop])
+                    break # Reached the end of the nesting
+        
+            # --- Padding ---
+            # We use -1 for padding, assuming prop indices are >= 0
+            pad_len = self.max_depth - depth
+            to_avoid = jnp.array(to_avoid_list + [-1] * pad_len, dtype=jnp.int32)
+            to_progress = jnp.array(to_progress_list + [-1] * pad_len, dtype=jnp.int32)
+            
+            # Initial state: only the outermost formula (index 0) is active
+            active_pointers = jnp.zeros(self.max_depth, dtype=bool).at[0].set(True)
+            
+            return active_pointers, to_avoid, to_progress, depth
+        def _parse_fresh_until(
+            formula_tuple: tuple, 
+        ) -> Tuple[ jnp.ndarray, jnp.ndarray, int]:
+            """
+            Parses one *fresh* !(a) U (b & ...) formula into JAX arrays.
+            This is the original parsing logic, used as a helper.
+            """
+            to_avoid_list = []
+            to_progress_list = []
+            curr = formula_tuple
+            
+            depth = 0
+            while True:
+                depth += 1
+                _, not_a, b_and_rest = curr
+                avoid_prop = not_a[1]
+                to_avoid_list.append(self.prop_map[avoid_prop])
+                
+                if isinstance(b_and_rest, tuple) and b_and_rest[0] == 'and':
+                    _, progress_prop, rest_formula = b_and_rest
+                    to_progress_list.append(self.prop_map[progress_prop])
+                    curr = rest_formula
+                else:
+                    progress_prop = b_and_rest
+                    to_progress_list.append(self.prop_map[progress_prop])
+                    break 
+        
+            pad_len = self.max_depth - depth
+            to_avoid = jnp.array(to_avoid_list + [-1] * pad_len, dtype=jnp.int32)
+            to_progress = jnp.array(to_progress_list + [-1] * pad_len, dtype=jnp.int32)
+            active_pointers = jnp.zeros(self.max_depth, dtype=bool).at[0].set(True)
+            
+            return active_pointers, to_avoid, to_progress, depth
+        
+        def _find_subformula_depth(full_formula: tuple, sub_formula: tuple) -> int:
+            """Finds the depth of sub_formula within full_formula. (0-indexed)"""
+            if str(full_formula) == str(sub_formula):
+                return 0
+            
+            if (isinstance(full_formula, tuple) and 
+                full_formula[0] == 'until' and len(full_formula) == 3 and
+                isinstance(full_formula[2], tuple) and
+                full_formula[2][0] == 'and' and len(full_formula[2]) == 3):
+                
+                rest_formula = full_formula[2][2]
+                depth = _find_subformula_depth(rest_formula, sub_formula)
+                if depth != -1:
+                    return depth + 1
+                    
+            return -1 # Not found
+        
+        def _parse_formula_state(
+            formula_tuple: Union[tuple, str], 
+        ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int, bool]:
+            """
+            Parses a single formula, which can be 'True', 'False', 
+            a fresh 'until' tuple, or an 'or' tuple representing a progressed state.
+            
+            Returns: (active_pointers, to_avoid, to_progress, depth, already_true)
+            """
+            
+            # --- Handle resolved states ---
+            if formula_tuple == 'True':
+                return (jnp.zeros(self.max_depth, dtype=bool), 
+                        jnp.full(self.max_depth, -1, dtype=jnp.int32), 
+                        jnp.full(self.max_depth, -1, dtype=jnp.int32), 
+                        1, True) # depth=1 (dummy)
+                
+            if formula_tuple == 'False':
+                return (jnp.zeros(self.max_depth, dtype=bool), 
+                        jnp.full(self.max_depth, -1, dtype=jnp.int32), 
+                        jnp.full(self.max_depth, -1, dtype=jnp.int32), 
+                        1, False) # depth=1 (dummy)
+        
+            # --- 1. Find all 'until' clauses ---
+            or_clauses = []
+            if formula_tuple[0] == 'or':
+                queue = [formula_tuple]
+                while queue:
+                    item = queue.pop()
+                    if isinstance(item, tuple) and item[0] == 'or':
+                        queue.append(item[1])
+                        queue.append(item[2])
+                    elif isinstance(item, tuple) and item[0] == 'until':
+                        or_clauses.append(item)
+            elif formula_tuple[0] == 'until':
+                or_clauses = [formula_tuple]
+            else:
+                 raise ValueError(f"Cannot parse formula state: {formula_tuple}")
+        
+            if not or_clauses: # e.g., an 'or' tree that resolved to 'False'
+                return (jnp.zeros(self.max_depth, dtype=bool), 
+                        jnp.full(self.max_depth, -1, dtype=jnp.int32), 
+                        jnp.full(self.max_depth, -1, dtype=jnp.int32), 
+                        1, False)
+        
+            # --- 2. Find the "base" formula (the one that contains all others) ---
+            parsed_formula_tuples = [f for f in or_clauses]
+            base_formula_tuple = None
+            for f_i in parsed_formula_tuples:
+                is_base = True
+                for f_j in parsed_formula_tuples:
+                    if _find_subformula_depth(f_i, f_j) == -1:
+                        is_base = False # f_i does not contain f_j
+                        break
+                if is_base:
+                    base_formula_tuple = f_i
+                    break
+                    
+            if base_formula_tuple is None:
+                raise ValueError("Cannot encode 'or' of disjoint formulas. "
+                                 "The 'or' must represent a single formula's progression.")
+        
+            # --- 3. Parse the base formula to get canonical arrays/depth ---
+            _, to_avoid, to_progress, depth = _parse_fresh_until(
+                base_formula_tuple, self.prop_map, self.max_depth
             )
-            return senders, receivers, edge_type_indices
-
-        # Initialize with a sentinel value to detect validly created edges.
-        num_potential_edges = max_formula_nodes * 3
-        init_val = jnp.full(num_potential_edges, -1, dtype=jnp.int32)
-        senders_padded, receivers_padded, edge_types_padded = jax.lax.fori_loop(
-            0, num_nodes, edge_construction_body, (init_val, init_val, init_val)
+        
+            # --- 4. Set active pointers based on 'or' clauses ---
+            active_pointers = jnp.zeros(self.max_depth, dtype=bool)
+            for sub_tuple in parsed_formula_tuples:
+                relative_depth = _find_subformula_depth(base_formula_tuple, sub_tuple)
+                active_pointers = active_pointers.at[relative_depth].set(True)
+        
+            return active_pointers, to_avoid, to_progress, depth, False 
+    
+        
+       
+        
+        
+        # 1. Collect all formulas from the 'and' tree
+        formulas_to_parse = []
+        if not isinstance(ltl_tuple, tuple): # 'True' or 'False'
+            formulas_to_parse = [ltl_tuple]
+        elif ltl_tuple[0] == 'and':
+            queue = [ltl_tuple]
+            while queue:
+                item = queue.pop()
+                if isinstance(item, tuple) and item[0] == 'and':
+                    queue.append(item[1])
+                    queue.append(item[2])
+                else: # 'until', 'or', 'True', 'False'
+                    formulas_to_parse.append(item)
+        else: # A single 'until' or 'or' formula
+            formulas_to_parse = [ltl_tuple]
+    
+        num_conjunctions = len(formulas_to_parse)
+        if num_conjunctions > self.max_conjunctions:
+            raise ValueError(f"Found {num_conjunctions} formulas, but self.max_conjunctions={self.max_conjunctions}")
+    
+        # 2. Parse each formula state
+        all_actives, all_avoids, all_progress, all_depths, all_already_true = [], [], [], [], []
+        
+        for f_tuple in formulas_to_parse:
+            act, avoid, prog, depth, already_true = _parse_formula_state(
+                f_tuple, self.prop_map, self.max_depth
+            )
+            all_actives.append(act)
+            all_avoids.append(avoid)
+            all_progress.append(prog)
+            all_depths.append(depth)
+            all_already_true.append(already_true)
+        
+        # 3. Pad the *batch* of formulas up to self.max_conjunctions
+        pad_n = self.max_conjunctions - num_conjunctions
+        all_already_true.extend([True] * pad_n) # Padded tasks are "already true"
+    
+        pad_active = jnp.zeros(self.max_depth, dtype=bool)
+        pad_avoid = jnp.full(self.max_depth, -1, dtype=jnp.int32)
+        pad_progress = jnp.full(self.max_depth, -1, dtype=jnp.int32)
+        pad_depth = 1 # Dummy depth
+        
+        all_actives.extend([pad_active] * pad_n)
+        all_avoids.extend([pad_avoid] * pad_n)
+        all_progress.extend([pad_progress] * pad_n)
+        all_depths.extend([pad_depth] * pad_n)
+    
+        # 4. Stack into a single ConjunctionState
+        return ConjunctionState(
+            active_pointers=jnp.stack(all_actives),
+            to_avoid=jnp.stack(all_avoids),
+            to_progress=jnp.stack(all_progress),
+            depths=jnp.array(all_depths, dtype=jnp.int32),
+            already_true=jnp.array(all_already_true, dtype=bool)
         )
 
-        # === 3. Gather Valid Edges and Pad for segment_sum ===
-        valid_edge_mask = senders_padded != -1
-        num_valid_edges = valid_edge_mask.sum()
+#############################################  VISUALIZE AST    ###########################################
 
-        # Use argsort to efficiently move all valid edges to the front.
-        sort_key = jnp.where(valid_edge_mask, jnp.arange(num_potential_edges), num_potential_edges)
-        permutation = jnp.argsort(sort_key)
-        senders_clean = senders_padded[permutation]
-        receivers_clean = receivers_padded[permutation]
-        edge_types_clean = edge_types_padded[permutation]
+    def visualize_ast(self, ast_data: OrderedDict, img_size=(1290, 1080)):
+        """
+        Visualizes an LTL AST graph from a data dictionary using
+        Networkx and Matplotlib.
 
-        # **MODIFIED**: Create a mask for padded edges (those after the valid ones).
-        # All padded senders and receivers should point to the padding node (index 0).
-        is_padded_edge_mask = jnp.arange(num_potential_edges) >= num_valid_edges
-        final_senders = jnp.where(is_padded_edge_mask, 0, senders_clean)
-        final_receivers = jnp.where(is_padded_edge_mask, 0, receivers_clean)
-        # We can also set the edge type to 'self' for padded edges.
-        final_edge_types = jnp.where(is_padded_edge_mask, edge_types['self'], edge_types_clean)
+        Args:
+            ast_data (OrderedDict): An ordered dictionary containing the graph data.
+            img_size (tuple): The target (width, height) in pixels for the
+                              output image.
 
-        # # === 4. Edge Feature Construction ===
-        # edge_features = jax.nn.one_hot(final_edge_types, num_classes=NUM_EDGE_TYPES, dtype=jnp.float32)
-        # # Mask out features for padded edges to ensure they are zero.
-        # edge_features = edge_features * (~is_padded_edge_mask)[:, None]
+        Returns:
+            PIL.Image.Image: A PIL Image object of the rendered graph, or None
+                             if plotting fails.
+        """
+        
+        try:
+            # 1. Extract data
+            nodes = ast_data['nodes']
+            senders = ast_data['senders']
+            receivers = ast_data['receivers']
+            
+            # <-- MODIFIED: Use .item() to get Python scalars from JAX arrays
+            # This is safer and more direct than .reshape(1)[0]
+            n_node = ast_data['n_node'].item()
+            n_edge = ast_data['n_edge'].item()
+            
+            edge_types = ast_data['edge_types']
+            
+            # 2. Slice data
+            nodes = nodes[:n_node]
+            senders = senders[:n_edge]
+            receivers = receivers[:n_edge]
+            edge_types = edge_types[:n_edge]
 
+        except KeyError as e:
+            print(f"Error: Missing key in ast_data: {e}", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"Error extracting data: {e}", file=sys.stderr)
+            return None
+
+        # 3. Build the Networkx Graph
+        G = nx.DiGraph()
+        node_labels = {}
+        node_colors = []
+        edge_labels = {}
+        
+        # 4. Add all nodes
+        for i in range(n_node):
+            node_id = str(i) # Use string IDs for consistency
+            node_features = nodes[i]
+            
+            try:
+                # <-- MODIFIED: .item() converts unhashable JAX scalar to Python int
+                vocab_index = np.argmax(node_features[:-1]).item() 
+                label = self.INV_LTL_BASE_VOCAB.get(vocab_index, f"UNK_{vocab_index}")
+            except Exception as e:
+                label = f"Error: {e}"
+
+            # <-- MODIFIED: .item() converts JAX bool to Python bool
+            is_root = (node_features[-1] == 1).item() 
+            
+            G.add_node(node_id)
+            
+            if is_root:
+                node_colors.append('lightgreen')
+                node_labels[node_id] = f"{label}\n(ROOT)"
+            else:
+                node_colors.append('lightblue')
+                node_labels[node_id] = label
+
+        # 5. Add all edges
+        for j in range(n_edge):
+            # Use .item() to convert numpy types to standard python types
+            sender_id = str(senders[j].item()) 
+            receiver_id = str(receivers[j].item())
+            
+            edge_type_index = edge_types[j]
+            if hasattr(edge_type_index, 'item'):
+                edge_type_index = edge_type_index.item()
+                
+            edge_label = self.INV_EDGE_TYPES.get(edge_type_index, f"UNK_{edge_type_index}")
+            
+            # Skip "self" loops
+            if edge_label == "self":
+                continue
+                
+            G.add_edge(sender_id, receiver_id)
+            edge_labels[(sender_id, receiver_id)] = edge_label
+
+        # 6. Plot with Matplotlib
+        dpi = 100
+        figsize = (img_size[0] / dpi, img_size[1] / dpi)
+        
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        
+        try:
+            # 7. Get layout
+            try:
+                pos = nx.drawing.nx_pydot.graphviz_layout(G, prog='dot')
+            except ImportError:
+                print("Warning: pydot not found. Using spring_layout.", file=sys.stderr)
+                print("Install pydot for a hierarchical tree layout.", file=sys.stderr)
+                pos = nx.spring_layout(G, seed=42)
+            
+            # 8. Draw graph components
+            nx.draw_networkx_nodes(
+                G, pos, ax=ax, node_color=node_colors, 
+                node_size=50, node_shape='s'
+            )
+            nx.draw_networkx_edges(
+                G, pos, ax=ax, arrowstyle='->', arrowsize=20, 
+                node_size=50, connectionstyle='arc3,rad=0.1'
+            )
+            nx.draw_networkx_labels(
+                G, pos, ax=ax, labels=node_labels, font_size=9
+            )
+            nx.draw_networkx_edge_labels(
+                G, pos, ax=ax, edge_labels=edge_labels, font_size=7
+            )
+            
+            ax.axis('off')
+            fig.tight_layout(pad=0)
+            
+            # 9. Save plot to in-memory buffer
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
+            buf.seek(0)
+            
+            # 10. Open as PIL Image and resize
+            img = Image.open(buf)
+            img = img.resize(img_size, Image.Resampling.LANCZOS)
+            
+            return img
+
+        except Exception as e:
+            print(f"Error during Networkx/Matplotlib plotting: {e}", file=sys.stderr)
+            return None
+        finally:
+            plt.close(fig)
+
+
+
+###################################  EVENTUALLY    ########################################################
+
+
+
+import logging
+import random as py_random
+import jax
+import jax.numpy as jnp
+from jax import random
+import numpy as np
+from functools import partial
+from jax import lax
+from jax.random import PRNGKey
+from collections import OrderedDict
+from typing import NamedTuple, Tuple, List, Dict, Any, Union
+from functools import partial
+import numpy as np
+import matplotlib.pyplot as plt
+import networkx as nx
+import re
+import matplotlib.pyplot as plt
+import graphviz
+from PIL import Image, ImageDraw, ImageFont
+import sys
+import os
+import io
+
+
+
+class AstBuildState(NamedTuple):
+    nodes: jnp.ndarray       # (MAX_NODES, feature_size)
+    senders: jnp.ndarray     # (MAX_EDGES,)
+    receivers: jnp.ndarray   # (MAX_EDGES,)
+    edge_types: jnp.ndarray  # (MAX_EDGES,)
+    node_idx: jnp.ndarray    # Scalar array, (1,)
+    edge_idx: jnp.ndarray    # Scalar array, (1,)
+
+
+class JaxEventuallyTaskSampler:
+    """
+    JAX-based sampler for LTL 'Eventually' formulas.
+
+    This class stores the static sampling configuration and provides a
+    JIT-compiled `sample` method to generate formula matrices.
+
+    The formula structure is a conjunction of 'Eventually' clauses,
+    where each claue can be nested and include disjunctions.
+    """
+
+    def __init__(
+        self,
+        propositions: List,
+        min_levels: int,
+        max_levels: int,
+        min_conjunctions: int,
+        max_conjunctions: int,
+        disjunction_prob: float = 0.25
+    ):
+        """
+        Initializes the sampler with static configuration.
+
+        Args:
+            num_propositions: Number of available atomic propositions (p1, p2...).
+            min_levels: Minimum nesting depth (F) for a conjunct.
+            max_levels: Maximum nesting depth (F) for a conjunct.
+            min_conjunctions: Minimum number of conjuncts (G(...)) in the formula.
+            max_conjunctions: Maximum number of conjuncts (G(...)) in the formula.
+            max_depth: Static max depth for the formula matrix (for JIT).
+            max_conjuncts: Static max conjuncts for the formula matrix (for JIT).
+            disjunction_prob: Probability of a clause being a disjunction F(p1 | p2).
+        """
+        # Store all configuration parameters as instance attributes
+        self.propositions = sorted(list(set(propositions)))
+        self.min_levels = min_levels
+        self.max_levels = max_levels
+        self.min_conjunctions = min_conjunctions
+        self.max_conjunctions = max_conjunctions
+        self.max_depth = max_levels
+        self.max_conjuncts = max_conjunctions
+        self.disjunction_prob = disjunction_prob
+        self.EDGE_TYPES = {
+        "self": 0,
+        "arg": 1,   # For unary operators
+        "arg1": 2,  # For binary operator, arg 1
+        "arg2": 3,  # For binary operator, arg 2
+         }
+        self.INV_EDGE_TYPES = {v: k for k, v in self.EDGE_TYPES.items()}
+        self.LTL_BASE_VOCAB = {
+            "and": 0, "or": 1, "not": 2, "next": 3, "until": 4,
+            "always": 5, "eventually": 6, "True": 7, "False": 8,
+        }
+        
+        self.PROPS_OFFSET = len(self.LTL_BASE_VOCAB)
+        for i, el in enumerate(self.propositions):
+            self.LTL_BASE_VOCAB[el] = self.PROPS_OFFSET + i
+        self.num_propositions=len(self.propositions)
+        self.INV_LTL_BASE_VOCAB = {v: k for k, v in self.LTL_BASE_VOCAB.items()}
+        self.PROP_TO_INDEX = {prop: i+1 for i, prop in enumerate(self.propositions)}
+
+        self.vocab_size = len(self.LTL_BASE_VOCAB)
+        self.feature_size = self.vocab_size + 1 # One-hot + is_root
+        
+        D = self.max_depth + 1
+        K = self.max_conjuncts + 1
+        
+        # Max nodes: K * (5*D + 1) covers subtrees + linkers + 'True' node
+        self.MAX_NODES = K * (5 * D + 1) 
+        
+        # Max edges: Each node has 1 'self' edge and at most 2 child edges.
+        self.MAX_EDGES = self.MAX_NODES * 3
+        
+        # Store token IDs for JAX functions
+        self.TOKEN_ID_AND = jnp.array(self.LTL_BASE_VOCAB['and'])
+        self.TOKEN_ID_OR = jnp.array(self.LTL_BASE_VOCAB['or'])
+        self.TOKEN_ID_F = jnp.array(self.LTL_BASE_VOCAB['eventually'])
+        self.TOKEN_ID_TRUE = jnp.array(self.LTL_BASE_VOCAB['True'])
+        
+   
+    def _sample_sequence_jax(self, key, num_levels, max_depth, num_propositions, disjunction_prob):
+        """
+        JAX-jittable function to sample a single conjunct sequence using lax.scan.
+        This function is vmapped in the main sampler.
+        """
+        
+        def scan_body(carry, d):
+            """
+            Body of the scan function, samples one level (depth).
+            'd' is the current depth index (from 0 to max_depth-1).
+            Uses rejection sampling to ensure new props are not in 'last'.
+            """
+            key, last_p1, last_p2 = carry
+            key, k_p1_loop, k_p2_loop, k_disj = random.split(key, 4)
+    
+            # 1. Sample p1, ensuring it's not the same as last_p1 or last_p2
+            def p1_loop_cond(val):
+                # Condition to *continue* looping
+                k, p1 = val
+                return (p1 == last_p1) | (p1 == last_p2)
+    
+            def p1_loop_body(val):
+                # Sample a new p1
+                k, p1_old = val
+                k, subkey = random.split(k)
+                p1_new = random.randint(subkey, (), 1, num_propositions + 1)
+                return k, p1_new
+    
+            # Initialize with dummy value 0 (which will trigger loop if last_p1/p2 is 0)
+            # or a valid prop. Rejection sampling handles all cases.
+            k_p1_loop, p1_init = p1_loop_body((k_p1_loop, last_p1)) 
+            _, p1 = jax.lax.while_loop(p1_loop_cond, p1_loop_body, (k_p1_loop, p1_init))
+    
+    
+            # 2. Sample if this is a disjunction
+            is_disj = random.bernoulli(k_disj, disjunction_prob)
+    
+            # 3. Sample p2, ensuring it's not p1, last_p1, or last_p2
+            def p2_loop_cond(val):
+                # Condition to *continue* looping
+                k, p2 = val
+                return (p2 == p1) | (p2 == last_p1) | (p2 == last_p2)
+    
+            def p2_loop_body(val):
+                # Sample a new p2
+                k, p2_old = val
+                k, subkey = random.split(k)
+                p2_new = random.randint(subkey, (), 1, num_propositions + 1)
+                return k, p2_new
+    
+            # Initialize with dummy value
+            k_p2_loop, p2_init = p2_loop_body((k_p2_loop, p1))
+            _, p2 = jax.lax.while_loop(p2_loop_cond, p2_loop_body, (k_p2_loop, p2_init))
+            
+            # 4. Apply masks
+            # Is this depth level active for this conjunct?
+            is_active = d < num_levels
+            
+            final_p1 = jnp.where(is_active, p1, 0)
+            final_p2 = jnp.where(is_active & is_disj, p2, 0)
+            
+            new_carry = (key, final_p1, final_p2) # Pass new "last" props
+            output = (final_p1, final_p2)       # The matrix row for this depth
+            return new_carry, output
+    
+        init_carry = (key, 0, 0) # (key, last_p1, last_p2)
+        depth_indices = jnp.arange(max_depth)
+        
+        # Run the scan over all depths
+        (final_key, _, _), (p1s, p2s) = jax.lax.scan(scan_body, init_carry, depth_indices)
+        
+        # p1s and p2s have shape (max_depth,)
+        return jnp.stack([p1s, p2s], axis=0) # Shape (2, max_depth)
+    
+    
+    @partial(jax.jit, static_argnames=['self'])
+    def sample(self,
+        key,
+    ):
+        """
+        JAX-jittable sampler for the LTL formula matrix.
+        """
+        key, k_conj, k_levels, k_seqs = random.split(key, 4)
+    
+        # 1. Sample number of conjuncts
+        num_conjs = random.randint(k_conj, (), self.min_conjunctions, self.max_conjunctions + 1)
+        
+        # 2. Create mask for active conjuncts
+        conj_mask = jnp.arange(self.max_conjuncts) < num_conjs
+        
+        # 3. Sample number of levels (depth) for each *potential* conjunct
+        levels = random.randint(k_levels, (self.max_conjuncts,), self.min_levels, self.max_levels + 1)
+        
+        # 4. Sample all sequences in parallel using vmap
+        seq_keys = random.split(k_seqs, self.max_conjuncts)
+        
+        # vmap the sequence sampler
+        # in_axes = (key, num_levels, max_depth, num_propositions, disjunction_prob)
+        vmap_sampler = jax.vmap(
+            self._sample_sequence_jax, 
+            in_axes=(0, 0, None, None, None),
+            out_axes=2 # Output shape (2, max_depth, max_conjuncts)
+        )
+        
+        formula_matrix = vmap_sampler(
+            seq_keys, levels, self.max_depth, self.num_propositions, self.disjunction_prob
+        )
+        
+        # 5. Apply the conjunct mask
+        final_matrix = formula_matrix * conj_mask[None, None, :]
+        
+        return final_matrix, num_conjs, jnp.average(levels)
+
+
+    ###########################    PROGRESS     ########################################################
+
+    @jax.jit
+    def _check_proposition_implication(p1_i, p2_i, p1_j, p2_j):
+        """
+        Checks if (p1_i | p2_i) => (p1_j | p2_j).
+        
+        This is true if the set of propositions {p1_i, p2_i} (ignoring 0s)
+        is a subset of {p1_j, p2_j} (ignoring 0s).
+        """
+        
+        # Check if p1_i is in the j-set {p1_j, p2_j}
+        # p1_i is "ok" if it's 0 (inactive) or if it's present in j.
+        p1_i_in_j = (p1_i == p1_j) | (p1_i == p2_j)
+        p1_i_ok = (p1_i == 0) | p1_i_in_j
+    
+        # Check if p2_i is in the j-set {p1_j, p2_j}
+        # p2_i is "ok" if it's 0 (inactive) or if it's present in j.
+        p2_i_in_j = (p2_i == p1_j) | (p2_i == p2_j)
+        p2_i_ok = (p2_i == 0) | p2_i_in_j
+    
+        # Both must be satisfied for the subset relationship to hold.
+        return p1_i_ok & p2_i_ok
+    
+    
+    @partial(jax.jit, static_argnames=['max_depth'])
+    def _check_conjunct_implication(conj_i, conj_j, max_depth):
+        """
+        Checks if conjunct C_i (implier) implies C_j (implied).
+        
+        This uses a 'subset-subsequence' check.
+        
+        Args:
+            conj_i (jnp.ndarray): Shape (2, max_depth), the implier conjunct.
+            conj_j (jnp.ndarray): Shape (2, max_depth), the implied conjunct.
+            max_depth (int): Static argument for loop bounds.
+            
+        Returns:
+            bool: True if C_i implies C_j.
+        """
+    
+        # We scan over the depths of C_j (the "implied" sequence).
+        # The carry `i_idx_carry` is the depth we are searching *from* in C_i.
+        
+        def scan_body(i_idx_carry, j_depth):
+            # Get the propositions for the current depth of C_j
+            p1_j = conj_j[0, j_depth]
+            p2_j = conj_j[1, j_depth]
+            
+            # Is this depth of C_j active? (i.e., p1_j > 0)
+            is_j_active = p1_j > 0
+            
+            # --- Inner loop: Find a matching i-depth ---
+            # We need to find the *first* depth k >= i_idx_carry in C_i
+            # such that C_i[k] is active and implies C_j[j_depth].
+            
+            def find_i_loop_cond(val):
+                # val is (k, found_match)
+                k, found_match = val
+                # Continue looping if we're still within bounds and haven't found a match
+                return (k < max_depth) & ~found_match
+    
+            def find_i_loop_body(val):
+                k, found_match = val
+                p1_i = conj_i[0, k]
+                p2_i = conj_i[1, k]
+                
+                # Is this depth of C_i active?
+                is_i_active = p1_i > 0
+                
+                # Check for proposition-level implication
+                i_implies_j = _check_proposition_implication(p1_i, p2_i, p1_j, p2_j)
+                
+                # We have a match if C_i[k] is active AND it implies C_j[j_depth]
+                is_match = is_i_active & i_implies_j
+                
+                # Return the next k and whether we found a match
+                return (k + 1, is_match)
+    
+            # Start the inner-loop search from `i_idx_carry`
+            initial_val = (i_idx_carry, jnp.array(False))
+            
+            # `final_k` will be the (k_of_match + 1) or max_depth
+            # `final_found` will be True if a match was found
+            final_k, final_found = jax.lax.while_loop(
+                find_i_loop_cond, 
+                find_i_loop_body, 
+                initial_val
+            )
+            
+            # This j_depth is satisfied if:
+            # 1. It was not active in the first place (~is_j_active)
+            # 2. It was active, and we found a matching i_depth (final_found)
+            j_level_satisfied = ~is_j_active | final_found
+            
+            # The new carry for the *next* scan iteration is `final_k`.
+            # This ensures our subsequence search in C_i only moves forward.
+            # The output for this scan step is whether this j_level was satisfied.
+            return final_k, j_level_satisfied
+    
+        # Initial carry: Start searching C_i from depth 0
+        init_carry = 0 
+        j_depths = jnp.arange(max_depth)
+        
+        # Run the scan over all of C_j's depths
+        (final_i_idx, all_j_levels_satisfied) = jax.lax.scan(
+            scan_body, init_carry, j_depths
+        )
+        
+        # The implication holds only if *all* of C_j's depths were satisfied.
+        return jnp.all(all_j_levels_satisfied)
+    
+    
+    # --- Main Simplification Function ---
+    
+    @partial(jax.jit, static_argnames=['max_depth', 'max_conjuncts'])
+    def simplify_conjuncts(formula_matrix, max_depth, max_conjuncts):
+        """
+        Simplifies the formula matrix by removing redundant conjuncts.
+        
+        A conjunct C_j is removed if any *other* active conjunct C_i implies it.
+        
+        Args:
+            formula_matrix (jnp.ndarray): Shape (2, max_depth, max_conjuncts).
+            max_depth (int): Static argument.
+            max_conjuncts (int): Static argument.
+            
+        Returns:
+            jnp.ndarray: A new formula matrix with redundant conjuncts zeroed out.
+        """
+        
+        # --- 1. Vmap the conjunct implication check ---
+        
+        # We want to run _check_conjunct_implication for all pairs (i, j).
+        # We will vmap over the *last* axis (axis=2) of two matrices.
+        vmapped_implies = jax.vmap(
+            _check_conjunct_implication, 
+            in_axes=(2, 2, None), # (conj_i, conj_j, max_depth)
+            out_axes=0
+        )
+        
+        # --- 2. Create all-pairs (i, j) ---
+        
+        # We need to compare every conjunct with every other conjunct.
+        i_indices = jnp.arange(max_conjuncts)
+        j_indices = jnp.arange(max_conjuncts)
+        
+        # Create all (i, j) pairs
+        # i_pairs = [0, 0, ..., 1, 1, ..., N, N, ...]
+        i_pairs = jnp.repeat(i_indices, max_conjuncts)
+        # j_pairs = [0, 1, ..., N, 0, 1, ..., N, ...]
+        j_pairs = jnp.tile(j_indices, max_conjuncts)
+    
+        # Get the data for all pairs.
+        # all_conj_i[..., k] will be the i-conjunct for the k-th pair.
+        # all_conj_j[..., k] will be the j-conjunct for the k-th pair.
+        # Shape of both is (2, max_depth, max_conjuncts * max_conjuncts)
+        all_conj_i = formula_matrix[:, :, i_pairs]
+        all_conj_j = formula_matrix[:, :, j_pairs]
+    
+        # --- 3. Run the implication check for all pairs ---
+        
+        # This is a 1D array of shape (max_conjuncts * max_conjuncts,)
+        implication_flat = vmapped_implies(all_conj_i, all_conj_j, max_depth)
+        
+        # Reshape to a 2D matrix: (i, j)
+        # implication_matrix[i, j] is True if C_i implies C_j
+        implication_matrix = implication_flat.reshape(max_conjuncts, max_conjuncts)
+        
+        # --- 4. Identify conjuncts to remove ---
+        
+        # A conjunct `j` is active if its p1 at depth 0 is > 0
+        is_active = formula_matrix[0, 0, :] > 0
+        
+        # Broadcast active masks for i and j
+        is_i_active = is_active[:, None]  # Shape (max_conjuncts, 1)
+        is_j_active = is_active[None, :]  # Shape (1, max_conjuncts)
+    
+        # A conjunct cannot imply itself for removal purposes
+        i_not_eq_j = ~jnp.eye(max_conjuncts, dtype=bool)
+        
+        # `valid_implication[i, j]` is True if:
+        # 1. i != j
+        # 2. C_i is active
+        # 3. C_j is active
+        # 4. C_i implies C_j
+        valid_implication = i_not_eq_j & is_i_active & is_j_active & implication_matrix
+        
+        # We want to remove any conjunct `j` (the "implied") if *any* *other*
+        # conjunct `i` (the "implier") implies it.
+        # We check for `any` along axis 0 (the `i` axis).
+        # This gives a 1D mask, True for each `j` that should be removed.
+        to_remove_mask_1d = jnp.any(valid_implication, axis=0) # Shape (max_conjuncts,)
+        
+        # --- 5. Create the new simplified matrix ---
+        
+        # We want a "keep" mask, which is the opposite
+        keep_mask_1d = ~to_remove_mask_1d
+        
+        # Broadcast the 1D keep_mask to the 3D matrix shape
+        keep_mask_broadcast = keep_mask_1d[None, None, :]
+        
+        # Zero out the conjuncts that are marked for removal
+        simplified_matrix = jnp.where(
+            keep_mask_broadcast,
+            formula_matrix,
+            0
+        )
+        
+        return simplified_matrix
+    
+    @partial(jax.jit, static_argnames=['self'])
+    def progress(self, formula_matrix, propositions_true):
+        """
+        Progresses the LTL formula matrix based on the propositions that are true.
+    
+        Args:
+            formula_matrix (jnp.ndarray): The formula representation, shape (2, max_depth, max_conjuncts).
+            propositions_true (jnp.ndarray): Boolean array of shape (num_propositions).
+                                             propositions_true[i] is True if proposition i is true.
+                                             propositions_true[0] is always False (padding).
+    
+        Returns:
+            jnp.ndarray: The new formula_matrix after one step of progression.
+        """
+        padding = jnp.array([False])
+        propositions_true = jnp.concatenate([padding, propositions_true])
+        
+        # Get the propositions at the current depth (depth 0) for all conjuncts
+        p1s = formula_matrix[0, 0, :]  # Shape (max_conjuncts,)
+        p2s = formula_matrix[1, 0, :]  # Shape (max_conjuncts,)
+    
+        # Check if the conditions are met
+        # propositions_true[0] is False, so if p1s or p2s is 0, this will be False.
+        p1s_met = propositions_true[p1s]
+        p2s_met = propositions_true[p2s]
+        
+        # A condition is met if it's active (p1s > 0) and either p1 or p2 is true
+        active_mask = p1s > 0
+        condition_met_mask = active_mask & (p1s_met | p2s_met) # Shape (max_conjuncts,)
+    
+        # Create the "progressed" matrix (roll depth dimension up by 1)
+        # This simulates F(p & F(...)) -> F(...)
+        progressed_matrix = jnp.roll(formula_matrix, shift=-1, axis=1)
+        # Zero out the last depth-level after rolling
+        progressed_matrix = progressed_matrix.at[:, self.max_depth - 1, :].set(0)
+    
+        # If the condition was not met, the formula remains the same (retained_matrix)
+        retained_matrix = formula_matrix
+    
+        # Use jnp.where to select between progressed and retained for each conjunct
+        # We need to broadcast the 1D mask to the 3D matrix shape
+        progress_mask_broadcast = jnp.broadcast_to(
+            condition_met_mask[None, None, :], 
+            formula_matrix.shape
+        )
+    
+        new_formula_matrix = jnp.where(
+            progress_mask_broadcast,
+            progressed_matrix,
+            retained_matrix
+        )
+        is_true = jnp.all(new_formula_matrix[0, 0, :] == 0)
+        
+        return new_formula_matrix, is_true, jnp.array(False)
+
+
+    #########################   AST BUILDER ##########################################################
+
+
+
+
+    @partial(jax.jit, static_argnames=['self'])
+    def _one_hot_feat(self, token_id, is_root):
+        """Helper to create a node feature vector."""
+        token_vec = jax.nn.one_hot(token_id, self.vocab_size, dtype=jnp.float32)
+        root_vec = jnp.array([is_root], dtype=jnp.float32)
+        return jnp.concatenate([token_vec, root_vec])
+
+    @partial(jax.jit, static_argnames=['self'])
+    def _add_edge(self, state: AstBuildState, sender_idx, receiver_idx, edge_type):
+        """Helper to add an edge to the graph state."""
+        e_idx = state.edge_idx[0]
+        new_senders = state.senders.at[e_idx].set(sender_idx)
+        new_receivers = state.receivers.at[e_idx].set(receiver_idx)
+        new_edge_types = state.edge_types.at[e_idx].set(edge_type)
+        return state._replace(
+            senders=new_senders,
+            receivers=new_receivers,
+            edge_types=new_edge_types,
+            edge_idx=state.edge_idx + 1
+        )
+
+    @partial(jax.jit, static_argnames=['self'])
+    def _add_node(self, state: AstBuildState, token_id, is_root=0.0):
+        """Helper to add a node and its 'self' edge."""
+        n_idx = state.node_idx[0]
+        feat = self._one_hot_feat(token_id, is_root)
+        new_nodes = state.nodes.at[n_idx].set(feat)
+        
+        new_state = state._replace(
+            nodes=new_nodes,
+            node_idx=state.node_idx + 1
+        )
+        # Add the 'self' edge
+        new_state = self._add_edge(new_state, n_idx, n_idx, self.EDGE_TYPES["self"])
+        return new_state, n_idx
+
+    @partial(jax.jit, static_argnames=['self'])
+    def _build_conjunct_scan_body(self, carry, x_slice):
+        """
+        lax.scan body to build one conjunct tree, iterating *backward* over depth.
+        This function is called *inside* another scan.
+        """
+        state, child_root_idx = carry
+        p1, p2 = x_slice # p1, p2 are prop_nums (1-indexed) or 0
+        
+        # --- 1. Check if this depth-level is active ---
+        is_active = p1 > 0
+        
+        def build_nodes_fn(carry_in):
+            """Function for lax.cond if p1 > 0."""
+            state_in, child_root_idx_in = carry_in
+            
+            # --- 2. Build the 'term' subtree (p1 or (or p1 p2)) ---
+            is_disj = p2 > 0
+            
+            def build_disj_term(state_t):
+                # Create 'or', 'p1', 'p2' nodes
+                state_t, or_idx = self._add_node(state_t, self.TOKEN_ID_OR)
+                # Convert 1-indexed prop_num to 0-indexed vocab ID
+                p1_token_id = p1 + self.PROPS_OFFSET - 1
+                p2_token_id = p2 + self.PROPS_OFFSET - 1
+                state_t, p1_idx = self._add_node(state_t, p1_token_id)
+                state_t, p2_idx = self._add_node(state_t, p2_token_id)
+                # Add edges
+                state_t = self._add_edge(state_t, p1_idx, or_idx, self.EDGE_TYPES["arg1"])
+                state_t = self._add_edge(state_t, p2_idx, or_idx, self.EDGE_TYPES["arg2"])
+                return state_t, or_idx
+                
+            def build_atom_term(state_t):
+                # Create 'p1' node
+                p1_token_id = p1 + self.PROPS_OFFSET - 1
+                state_t, p1_idx = self._add_node(state_t, p1_token_id)
+                return state_t, p1_idx
+
+            state_in, term_root_idx = jax.lax.cond(
+                is_disj, build_disj_term, build_atom_term, state_in
+            )
+
+            # --- 3. Build the 'F' or 'F(&...)' structure ---
+            is_innermost = child_root_idx_in < 0
+
+            def build_innermost_f(state_f):
+                # Structure: F -> term
+                state_f, f_idx = self._add_node(state_f, self.TOKEN_ID_F)
+                state_f = self._add_edge(state_f, term_root_idx, f_idx, self.EDGE_TYPES["arg"])
+                return state_f, f_idx
+            
+            def build_outer_f_and(state_f):
+                # Structure: F -> & -> term
+                #                    -> child_root (from prev step)
+                state_f, f_idx = self._add_node(state_f, self.TOKEN_ID_F)
+                state_f, and_idx = self._add_node(state_f, self.TOKEN_ID_AND)
+                # F -> &
+                state_f = self._add_edge(state_f, and_idx, f_idx, self.EDGE_TYPES["arg"])
+                # & -> term
+                state_f = self._add_edge(state_f, term_root_idx, and_idx, self.EDGE_TYPES["arg1"])
+                # & -> child
+                state_f = self._add_edge(state_f, child_root_idx_in, and_idx, self.EDGE_TYPES["arg2"])
+                return state_f, f_idx
+
+            state_out, new_root_idx = jax.lax.cond(
+                is_innermost, build_innermost_f, build_outer_f_and, state_in
+            )
+            
+            return state_out, new_root_idx
+
+        def no_op_fn(carry_in):
+            """Function for lax.cond if p1 == 0. No change."""
+            return carry_in
+
+        # Run the conditional build
+        final_state, final_root_idx = jax.lax.cond(
+            is_active, build_nodes_fn, no_op_fn, (state, child_root_idx)
+        )
+        
+        # Return new carry, and the root of the subtree built *at this step*
+        # The final carry will have the root of the *entire* conjunct tree.
+        return (final_state, final_root_idx), final_root_idx
+
+
+    @partial(jax.jit, static_argnames=['self'])
+    def _link_conjuncts_scan_body(self, carry, conj_root_idx):
+        """
+        lax.scan body to link the roots of the conjunct subtrees
+        together with 'and' nodes.
+        """
+        state, root_so_far_idx = carry
+        
+        # Check if this conjunct was active (root_idx >= 0)
+        is_active = conj_root_idx >= 0
+
+        def handle_active_node(carry_in):
+            """lax.cond helper: This conjunct is active."""
+            state_in, root_so_far_idx_in = carry_in
+            
+            is_first_active_node = root_so_far_idx_in < 0
+            
+            def add_first_node(state_f):
+                # This is the first active conjunct. Its root is the new root-so-far.
+                # No new nodes/edges are added yet.
+                return state_f, conj_root_idx
+            
+            def add_subsequent_node(state_s):
+                # This is not the first. Link it with the previous root-so-far
+                # using a new 'and' node.
+                # Structure: & -> root_so_far
+                #              -> conj_root_idx
+                state_s, and_idx = self._add_node(state_s, self.TOKEN_ID_AND)
+                state_s = self._add_edge(state_s, root_so_far_idx_in, and_idx, self.EDGE_TYPES["arg1"])
+                state_s = self._add_edge(state_s, conj_root_idx, and_idx, self.EDGE_TYPES["arg2"])
+                # The new 'and' node is now the root-so-far.
+                return state_s, and_idx
+
+            new_state, new_root_idx = jax.lax.cond(
+                is_first_active_node, add_first_node, add_subsequent_node, state_in
+            )
+            return new_state, new_root_idx
+
+        def handle_inactive_node(carry_in):
+            """lax.cond helper: This conjunct is inactive. Do nothing."""
+            return carry_in
+
+        # Run the conditional logic
+        final_state, final_root_so_far = jax.lax.cond(
+            is_active, handle_active_node, handle_inactive_node, carry
+        )
+
+        return (final_state, final_root_so_far), None # No scan output needed
+
+
+    @partial(jax.jit, static_argnames=['self'])
+    def build_ast(self, formula_matrix):
+        """
+        JAX-jittable method to build an AST graph from a formula matrix.
+        
+        Args:
+            formula_matrix (jnp.ndarray): Shape (2, max_depth, max_conjuncts)
+            
+        Returns:
+            OrderedDict: A dict representing the graph in jraph-compatible format.
+        """
+        
+        
+             
+        init_state = AstBuildState(
+            nodes=jnp.zeros((self.MAX_NODES, self.feature_size), dtype=jnp.float32),
+            senders=jnp.full((self.MAX_EDGES,), -1, dtype=jnp.int32),
+            receivers=jnp.full((self.MAX_EDGES,), -1, dtype=jnp.int32),
+            edge_types=jnp.full((self.MAX_EDGES,), -1, dtype=jnp.int32),
+            node_idx=jnp.array([1]),
+            edge_idx=jnp.array([0])
+        )
+
+        # --- 1. Build Conjunct Forest ---
+        # We scan over the conjuncts (axis 2 of the matrix)
+        # For each one, we run an *inner scan* over depth.
+        
+        def build_forest_scan_body(state, c_idx):
+            """Outer scan body (over conjuncts)"""
+            # Get the (p1s, p2s) for this conjunct
+            p1s = formula_matrix[0, :, c_idx]
+            p2s = formula_matrix[1, :, c_idx]
+            
+            # We must scan backward over depth (D-1 down to 0)
+            depth_indices_reversed = jnp.arange(self.max_depth - 1, -1, -1)
+            
+            # Pack p1s, p2s for the scan
+            # We only need the values at the reversed depth indices
+            xs_inner = (p1s[depth_indices_reversed], p2s[depth_indices_reversed])
+            
+            # This is the 'carry' for the *inner* scan
+            init_inner_carry = (state, jnp.array(-1)) # (state, child_root_idx)
+            
+            # Run the inner scan to build one conjunct subtree
+            (final_state, final_conj_root_idx), _ = jax.lax.scan(
+                self._build_conjunct_scan_body, init_inner_carry, xs_inner
+            )
+            
+            # Return the updated state, and the root ID of the tree we just built
+            return final_state, final_conj_root_idx
+        
+        # Run the outer scan over all conjuncts
+        # `final_forest_state` has all nodes/edges for all disjoint trees
+        # `all_conjunct_roots` has shape (max_conjuncts,)
+        final_forest_state, all_conjunct_roots = jax.lax.scan(
+            build_forest_scan_body, init_state, jnp.arange(self.max_conjuncts)
+        )
+
+        # --- 2. Link Conjuncts ---
+        # Now, link the roots in `all_conjunct_roots` with 'and' nodes
+        init_link_carry = (final_forest_state, jnp.array(-1)) # (state, root_so_far)
+        
+        (final_linked_state, final_root_idx), _ = jax.lax.scan(
+            self._link_conjuncts_scan_body, init_link_carry, all_conjunct_roots
+        )
+        
+        # --- 3. Handle 'True' case (no active conjuncts) ---
+        is_empty_formula = final_root_idx < 0
+        
+        def add_true_node_fn(state):
+            """If formula was empty, add a 'True' node."""
+            new_state, true_idx = self._add_node(state, self.TOKEN_ID_TRUE)
+            return new_state, true_idx
+            
+        def keep_existing_root_fn(state):
+            """Formula was not empty, just pass state and root."""
+            return state, final_root_idx
+            
+        final_state, final_root_idx_safe = jax.lax.cond(
+            is_empty_formula, add_true_node_fn, keep_existing_root_fn, final_linked_state
+        )
+
+        # --- 4. Set 'is_root' feature ---
+        # The 'is_root' feature is the last one in the feature vector
+        final_nodes = final_state.nodes.at[final_root_idx_safe, -1].set(1.0)
+        final_state = final_state._replace(nodes=final_nodes)
+
+        # --- 5. Format Output ---
+        # Get final counts
+        final_n_node = final_state.node_idx
+        final_n_edge = final_state.edge_idx
+        
         return OrderedDict([
-            ('nodes', node_features),
-            ('senders', final_senders),
-            ('receivers', final_receivers),
-            ('n_node', jnp.array([num_nodes])),
-            ('edge_types', final_edge_types)
+            ('nodes', final_state.nodes),
+            ('senders', final_state.senders),
+            ('receivers', final_state.receivers),
+            ('n_node', final_n_node.reshape(1)),
+            ('n_edge', final_n_edge.reshape(1)),
+            ('edge_types', final_state.edge_types)
         ])
 
 
-    @partial(jax.jit, static_argnums=0)
-    def __call__(self, encoded_array: jnp.ndarray, num_nodes: int):
+    ####################################     ENCODE     DECODE   #################################################
+    
+    def encode_formula(self, formula_tuple):
         """
-        Processes an encoded formula array to produce a padded graph representation
-        that is compatible with jax.ops.segment_sum.
+        Encodes a Python tuple representation of a formula into a NumPy matrix.
+        Not JAX-jittable.
         """
-        # The __call__ can't be jitted with self, as it would recompile for every instance.
-        # The performance comes from jitting the static _build_graph_static method.
-        return JaxASTBuilder._build_graph_static(encoded_array, num_nodes,max_formula_nodes=self.max_formula_nodes,max_graph_nodes=self.max_graph_nodes,vocab_size=VOCAB_SIZE)
+        matrix = np.zeros((2, self.max_depth, self.max_conjuncts), dtype=np.int32)
+        
+        # 1. Collect top-level conjuncts
+        conjuncts = []
+        def collect_conjuncts(f):
+            if not f:
+                return
+            if f[0] == 'and':
+                collect_conjuncts(f[1])
+                collect_conjuncts(f[2])
+            else:
+                conjuncts.append(f)
+                
+        collect_conjuncts(formula_tuple)
+        
+        # 2. Iterate over conjuncts and fill matrix
+        for c_idx, task in enumerate(conjuncts):
+            if c_idx >= self.max_conjuncts:
+                break # Too many conjuncts for our matrix
+            
+            d_idx = 0
+            current_task = task
+            
+            # 3. Unroll the 'eventually (and ...)' structure
+            while current_task and current_task[0] == 'eventually' and d_idx < self.max_depth:
+                term = current_task[1]
+                
+                if term[0] == 'and':
+                    prop_part = term[1]
+                    current_task = term[2] # This is the next 'eventually'
+                else:
+                    prop_part = term       # This is the last term in the sequence
+                    current_task = None    # Stop unrolling
+                
+                # 4. Encode the proposition part (atom or disjunction)
+                if isinstance(prop_part, str):
+                    if prop_part in PROP_TO_INDEX:
+                        matrix[0, d_idx, c_idx] = PROP_TO_INDEX[prop_part]
+                        matrix[1, d_idx, c_idx] = 0
+                elif prop_part[0] == 'or':
+                    if prop_part[1] in LTL_BASE_VOCAB:
+                        matrix[0, d_idx, c_idx] = PROP_TO_INDEX[prop_part[1]]
+                    if prop_part[2] in LTL_BASE_VOCAB:
+                        matrix[1, d_idx, c_idx] = PROP_TO_INDEX[prop_part[2]]
+                
+                d_idx += 1
+                
+        return jnp.array(matrix)
 
-"""# Environment"""
+
+    
+
+    
+
+    def decode_formula(self, formula_matrix):
+        """
+        Decodes a formula matrix (NumPy or JAX array) back into a Python tuple.
+        Not JAX-jittable.
+        """
+        conjuncts = []
+        # Ensure we're working with NumPy for easy iteration
+        matrix = np.asarray(formula_matrix)
+        max_depth, max_conjuncts = matrix.shape[1], matrix.shape[2]
+        
+        for c_idx in range(max_conjuncts):
+            # 1. Check if this conjunct is active
+            if matrix[0, 0, c_idx] == 0:
+                continue
+                
+            # 2. Read the sequence of propositions for this conjunct
+            seq_parts = []
+            for d_idx in range(max_depth):
+                p1_int = matrix[0, d_idx, c_idx]
+                p2_int = matrix[1, d_idx, c_idx]
+                
+                if p1_int == 0:
+                    break # End of this sequence
+                
+                if p2_int == 0:
+                    # Single proposition
+                    term = self.INV_LTL_BASE_VOCAB.get(p1_int+self.PROPS_OFFSET-1, f"P{p1_int}?")
+                else:
+                    # Disjunction
+                    term = ('or', 
+                           self.INV_LTL_BASE_VOCAB.get(p1_int+self.PROPS_OFFSET-1, f"P{p1_int}?"), 
+                            self.INV_LTL_BASE_VOCAB.get(p2_int+self.PROPS_OFFSET-1, f"P{p2_int}?")
+                           )
+                seq_parts.append(term)
+            
+            if not seq_parts:
+                continue
+                
+            # 3. Rebuild the nested 'eventually' structure from the sequence
+            # (This logic is from your _get_sequence helper)
+            task = None
+            for term in reversed(seq_parts):
+                if task is None:
+                    # This is the innermost 'eventually'
+                    task = ('eventually', term)
+                else:
+                    # This is an outer 'eventually'
+                    task = ('eventually', ('and', term, task))
+            
+            if task:
+                conjuncts.append(task)
+                
+        # 4. Combine all conjuncts with 'and'
+        if not conjuncts:
+            return True 
+            
+        # 4. Combine all conjuncts with 'and' in a consistent order
+        #    (Builds (and, C1, (and, C2, C3)))
+        ltl = conjuncts[-1]
+        for i in range(len(conjuncts) - 2, -1, -1):
+            ltl = ('and', conjuncts[i], ltl)
+            
+        return ltl_tuple_to_string(ltl)
+
+    def visualize_ast(self, ast_data: OrderedDict, img_size=(1290, 1080)):
+        """
+        Visualizes an LTL AST graph from a data dictionary using
+        Networkx and Matplotlib.
+
+        Args:
+            ast_data (OrderedDict): An ordered dictionary containing the graph data.
+            img_size (tuple): The target (width, height) in pixels for the
+                              output image.
+
+        Returns:
+            PIL.Image.Image: A PIL Image object of the rendered graph, or None
+                             if plotting fails.
+        """
+        
+        try:
+            # 1. Extract data
+            nodes = ast_data['nodes']
+            senders = ast_data['senders']
+            receivers = ast_data['receivers']
+            
+            # <-- MODIFIED: Use .item() to get Python scalars from JAX arrays
+            # This is safer and more direct than .reshape(1)[0]
+            n_node = ast_data['n_node'].item()
+            n_edge = ast_data['n_edge'].item()
+            
+            edge_types = ast_data['edge_types']
+            
+            # 2. Slice data
+            nodes = nodes[:n_node]
+            senders = senders[:n_edge]
+            receivers = receivers[:n_edge]
+            edge_types = edge_types[:n_edge]
+
+        except KeyError as e:
+            print(f"Error: Missing key in ast_data: {e}", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"Error extracting data: {e}", file=sys.stderr)
+            return None
+
+        # 3. Build the Networkx Graph
+        G = nx.DiGraph()
+        node_labels = {}
+        node_colors = []
+        edge_labels = {}
+        
+        # 4. Add all nodes
+        for i in range(n_node):
+            node_id = str(i) # Use string IDs for consistency
+            node_features = nodes[i]
+            
+            try:
+                # <-- MODIFIED: .item() converts unhashable JAX scalar to Python int
+                vocab_index = np.argmax(node_features[:-1]).item() 
+                label = self.INV_LTL_BASE_VOCAB.get(vocab_index, f"UNK_{vocab_index}")
+            except Exception as e:
+                label = f"Error: {e}"
+
+            # <-- MODIFIED: .item() converts JAX bool to Python bool
+            is_root = (node_features[-1] == 1).item() 
+            
+            G.add_node(node_id)
+            
+            if is_root:
+                node_colors.append('lightgreen')
+                node_labels[node_id] = f"{label}\n(ROOT)"
+            else:
+                node_colors.append('lightblue')
+                node_labels[node_id] = label
+
+        # 5. Add all edges
+        for j in range(n_edge):
+            # Use .item() to convert numpy types to standard python types
+            sender_id = str(senders[j].item()) 
+            receiver_id = str(receivers[j].item())
+            
+            edge_type_index = edge_types[j]
+            if hasattr(edge_type_index, 'item'):
+                edge_type_index = edge_type_index.item()
+                
+            edge_label = self.INV_EDGE_TYPES.get(edge_type_index, f"UNK_{edge_type_index}")
+            
+            # Skip "self" loops
+            if edge_label == "self":
+                continue
+                
+            G.add_edge(sender_id, receiver_id)
+            edge_labels[(sender_id, receiver_id)] = edge_label
+
+        # 6. Plot with Matplotlib
+        dpi = 100
+        figsize = (img_size[0] / dpi, img_size[1] / dpi)
+        
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        
+        try:
+            # 7. Get layout
+            try:
+                pos = nx.drawing.nx_pydot.graphviz_layout(G, prog='dot')
+            except ImportError:
+                print("Warning: pydot not found. Using spring_layout.", file=sys.stderr)
+                print("Install pydot for a hierarchical tree layout.", file=sys.stderr)
+                pos = nx.spring_layout(G, seed=42)
+            
+            # 8. Draw graph components
+            nx.draw_networkx_nodes(
+                G, pos, ax=ax, node_color=node_colors, 
+                node_size=50, node_shape='s'
+            )
+            nx.draw_networkx_edges(
+                G, pos, ax=ax, arrowstyle='->', arrowsize=20, 
+                node_size=50, connectionstyle='arc3,rad=0.1'
+            )
+            nx.draw_networkx_labels(
+                G, pos, ax=ax, labels=node_labels, font_size=9
+            )
+            nx.draw_networkx_edge_labels(
+                G, pos, ax=ax, edge_labels=edge_labels, font_size=7
+            )
+            
+            ax.axis('off')
+            fig.tight_layout(pad=0)
+            
+            # 9. Save plot to in-memory buffer
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
+            buf.seek(0)
+            
+            # 10. Open as PIL Image and resize
+            img = Image.open(buf)
+            img = img.resize(img_size, Image.Resampling.LANCZOS)
+            
+            return img
+
+        except Exception as e:
+            print(f"Error during Networkx/Matplotlib plotting: {e}", file=sys.stderr)
+            return None
+        finally:
+            plt.close(fig)
+
 
 import jax
 import jax.numpy as jnp
@@ -1091,12 +2403,12 @@ class JaxSimpleLTLEnv:
             - (int) Maximum length of the episode
         """
         # --- Static (compile-time) attributes ---
-        unique_letters = sorted(list(set(letters)))
-        self.num_letter_types = len(unique_letters)
+        self.unique_letters = sorted(list(set(letters)))
+        self.num_letter_types = len(self.unique_letters)
 
         # This string map is NOT JAX-compatible and cannot be used
         # inside jitted functions. It's only for non-jit helpers.
-        self._letter_map = {i: letter for i, letter in enumerate(unique_letters)}
+        self._letter_map = {i: letter for i, letter in enumerate(self.unique_letters)}
 
         # Store default parameters
         self.default_params = SimpleLTLEnvParams(
@@ -1190,11 +2502,8 @@ class JaxSimpleLTLEnv:
             lambda: jax.nn.one_hot(state.proposition, params.num_letters, dtype=jnp.bool_)
         )
 
-    def get_propositions(self, params: SimpleLTLEnvParams) -> chex.Array:
-        """
-        Returns the set of all possible propositions *as integer indices*.
-        """
-        return jnp.arange(params.num_letters)
+    def get_propositions(self) -> List:
+        return self.unique_letters
 
     # --- Non-JAX helper for debugging ---
 
@@ -1226,43 +2535,38 @@ class LTLEnvState(PyTreeNode):
     ltl_goal: jnp.ndarray   # Current LTL formula
     ltl_original: jnp.ndarray  # Original LTL formula
     key: jnp.ndarray  # PRNG key
-    num_nodes: jnp.ndarray
-    root_idx: jnp.ndarray
 
 class LTLEnv:
     """
     Functional wrapper adding LTL goals.
     Adds LTL formula to observations, progresses it, and modifies rewards.
     """
-    def __init__(self, env: JaxSimpleLTLEnv, params: any, progression_mode: str = "full", intrinsic: float = 0.0):
+    def __init__(self, env: JaxSimpleLTLEnv, sampler, params: any, progression_mode: str = "full", intrinsic: float = 0.0):
         self.env = env
         self.params = params
         self.progression_mode = progression_mode
-        self.propositions = env.get_propositions(params)
-        self.sampler = JaxUntilTaskSampler(propositions, min_levels=1, max_levels=3, min_conjunctions=1, max_conjunctions=2)
+        self.propositions = env.get_propositions()
+        self.sampler = sampler
         self.intrinsic = intrinsic
         self.observation_space = spaces.Dict({
             'features': env.observation_space(params),
             'text': spaces.Box(low=0, high=0, shape=(), dtype=object) if progression_mode in ["full", "none"]
                    else spaces.Box(low=-1, high=1, shape=(len(self.propositions),), dtype=jnp.float32)
         })
-        self.ast_builder = JaxASTBuilder(VOCAB_SIZE, MAX_NODES)
     @partial(jax.jit, static_argnames=("self", "params"))
     def reset(self, key: jnp.ndarray, params: any) -> tuple[dict, LTLEnvState]:
         """Reset env, sample LTL goal, return dict obs and state."""
         key, subkey, sample_key= jax.random.split(key,3)
         obs, env_state = self.env.reset(subkey, params)
 
-        final_array, num_nodes, root_idx = self.sample_ltl_goal(sample_key)
+        final_array, _, _ = self.sample_ltl_goal(sample_key)
         ltl_state = LTLEnvState(
             env_state=env_state,
             ltl_goal=final_array,
             ltl_original=final_array,
             key=key,
-            num_nodes=num_nodes,
-            root_idx=root_idx
         )
-        graph = self.ast_builder(final_array, num_nodes)
+        graph = self.sampler.build_ast(final_array)
         ltl_obs=graph
         return ltl_obs, ltl_state
 
@@ -1278,11 +2582,8 @@ class LTLEnv:
 
         # --- 2. Progress the LTL goal ---
         truth_assignment = self.get_events(new_env_state, params)
-        ltl_goal, root_index, num_nodes = progress_and_clean_jax(state.ltl_goal, truth_assignment, state.root_idx, state.num_nodes)
-
-        # --- 3. Compute LTL reward and done status ---
-        is_true = (ltl_goal[0][0] == LTL_BASE_VOCAB['True'])
-        is_false = (ltl_goal[0][0] == LTL_BASE_VOCAB['False'])
+        ltl_goal, is_true, is_false= self.sampler.progress(state.ltl_goal, truth_assignment)
+        
         ltl_done = jnp.logical_or(is_true, is_false)
         ltl_reward = jax.lax.cond(
             is_true,
@@ -1316,10 +2617,8 @@ class LTLEnv:
                 ltl_goal=ltl_goal,
                 ltl_original=state.ltl_original,
                 key=step_key, # The new state gets the used step_key
-                num_nodes=num_nodes,
-                root_idx=root_index
             )
-            graph = self.ast_builder(ltl_goal, num_nodes)
+            graph = self.sampler.build_ast(ltl_goal)
             new_obs = graph
             return new_obs, new_state
 
@@ -1338,101 +2637,20 @@ class LTLEnv:
         return final_obs, final_reward, final_done, info, final_state
 
 
-    # def sample_ltl_goal(self) -> any:
-    #     """Sample LTL formula, adjust timeout for SequenceSampler."""
-    #     formula = self.sampler.sample()
-    #     if isinstance(self.sampler, SequenceSampler):
-    #         def count_and(formula):
-    #             return sum(count_and(item) for item in formula if isinstance(item, tuple)) + 1
-    #         length = count_and(formula)
-    #         self.params = self.params.replace(timeout=25)  # 10 * length
-    #     return formula
+    
     def sample_ltl_goal(self,key) -> any:
         """Sample LTL formula, adjust timeout for SequenceSampler."""
-        final_array, num_nodes, root_idx, _, _ = self.sampler.sample(key)
-        return final_array, num_nodes, root_idx
+        final_array,  _, _ = self.sampler.sample(key)
+        return final_array, _, _
 
     def get_events(self, env_state: SimpleLTLState, params: SimpleLTLEnvParams) -> chex.Array:
         """Get current propositions from the underlying env using its state."""
         return self.env.get_events(env_state, params)
 
-class NoLTLWrapper:
-    """Remove LTL wrapper, return plain env observations."""
-    def __init__(self, env: JaxSimpleLTLEnv, params: any):
-        self.env = env
-        self.params = params
-        self.observation_space = env.observation_space(params)
-
-    def reset(self, key: jnp.ndarray, params: any) -> tuple[any, any]:
-        return self.env.reset(key, params)
-
-    def step(self, key: jnp.ndarray, state: any, action: int, params: any) -> tuple[any, float, bool, dict, any]:
-        return self.env.step_env(key, state, action, params)
-
-    def get_propositions(self, params: any) -> list:
-        return []
 
 
 
-# --- import your LetterEnv implementation ---
-# from letter_env_fixed import LetterEnv, EnvParams   # <-- adjust to your filename
-# from ltl_env_wrapper import LTLEnv                  # <-- adjust if you saved wrapper separately
 
-def main_wrap():
-    # Create the base LetterEnv
-    env = LetterEnv()
-    params = EnvParams(grid_size=5, letters="aabbccddee", use_fixed_map=False, use_agent_centric_view=False, timeout=10)
-
-    # Wrap with the LTLEnv wrapper
-    ltl_env = LTLEnv(env, params, progression_mode="full", intrinsic=0.0)
-
-    # PRNG key
-    key = jax.random.PRNGKey(0)
-
-    # Reset
-    obs, state = ltl_env.reset(key, params)
-    print("\n=== RESET ===")
-    show(env, state.env_state, params)
-    show_features(env, obs['features'], params)
-    print("Initial LTL goal:", state.ltl_goal)
-
-    str_to_action = {"w": 0, "s": 1, "a": 2, "d": 3}
-    step_idx = 0
-
-    while True:
-        step_idx += 1
-        print("\n--- Step", step_idx, "---")
-        cmd = input("Action? (w/a/s/d)  r=random  q=quit  > ").strip().lower()
-        if cmd == "q":
-            print("Quitting.")
-            break
-        if cmd == "r":
-            action = random.choice([0, 1, 2, 3])
-        elif cmd in str_to_action:
-            action = str_to_action[cmd]
-        else:
-            print("Unknown command; try w/a/s/d, r, or q.")
-            continue
-
-        # Step the LTL-wrapped env (we pass state.key so wrapper can split it internally)
-        obs, total_reward, done, info, state = ltl_env.step(state.key, state, action, params)
-
-        # Show grid and features (from underlying env_state stored in wrapper state)
-        show(env, state.env_state, params)
-        show_features(env, obs['features'], params)
-
-        # Print debug info
-        print("Action:", action, "(w/up=0, s/down=1, a/left=2, d/right=3)")
-        print("Underlying env reward:", info.get('env_reward'))
-        print("LTL reward:", info.get('ltl_reward'))
-        print("Total reward returned:", total_reward)
-        print("Truth assignment at new agent pos:", repr(info.get('truth_assignment')))
-        print("Progressed LTL goal (in state):", state.ltl_goal)
-        print("Is episode done?:", done)
-
-        if done:
-            print("\nEpisode finished (env or LTL termination).")
-            break
 
 """# GCN Model"""
 
@@ -1742,11 +2960,12 @@ class BaseAlgo(ABC):
         self.vmapped_env_step = jax.vmap(
             step_environment, in_axes=(0, 0, 0, None)
         )
+    @partial(jax.jit, static_argnames=['self'])   
     def collect_experiences(self, algo_state: AlgoState, rollout_state: RolloutState) -> tuple[dict, dict, AlgoState, RolloutState]:
         """Collects rollouts and computes advantages. Can be JIT-compiled."""
 
 
-        @jax.jit
+        
         def step_fn(carry: RolloutState, _):
             """
             This function is scanned over, representing one time step for ALL parallel processes.
@@ -1843,7 +3062,7 @@ class BaseAlgo(ABC):
         exps_dict = {key: experiences[key] for key in keys_to_keep}
 
         # Reshape data to (num_procs * num_frames_per_proc, ...) for the update step
-        exps = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1).reshape(-1, *x.shape[2:]), exps_dict)
+        exps = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1).reshape(-1, *x.shape[2:]), exps_dict)
 
         jax_logs = {
             "ep_return_at_done": experiences['ep_return_at_done'],
@@ -2022,11 +3241,11 @@ class PPO(BaseAlgo):
             # Shuffle the experience data at the start of each epoch
             r, perm_key = jax.random.split(r)
             permutation = jax.random.permutation(perm_key, self.num_frames)
-            shuffled_exps = jax.tree_map(lambda x: x[permutation], exps)
+            shuffled_exps = jax.tree.map(lambda x: x[permutation], exps)
 
             # Reshape data into minibatches
             num_minibatches = self.num_frames // self.batch_size
-            minibatches = jax.tree_map(
+            minibatches = jax.tree.map(
                 lambda x: x.reshape((num_minibatches, self.batch_size) + x.shape[1:]),
                 shuffled_exps
             )
@@ -2093,7 +3312,7 @@ def create_train_step(ppo_algo: PPO):
     """
     
     # Use partial to mark 'ppo_algo' as a static argument
-    @jax.jit
+    
     def _train_step(
         algo_state: AlgoState, 
         rollout_state: RolloutState, 
@@ -2137,9 +3356,9 @@ def main():
 
     # --- Hyperparameters ---
     config = {
-        "LR": 0.005,
+        "LR": 1e-3,
         "NUM_PROCS": 16, # Increased for more parallel data
-        "NUM_FRAMES_PER_PROC": 512,
+        "NUM_FRAMES_PER_PROC": 256,
         "DISCOUNT": 0.9,
         "GAE_LAMBDA": 0.5,
         "ENTROPY_COEF": 0.01,
@@ -2170,6 +3389,7 @@ def main():
         wandb.init(
             project=config["WANDB_PROJECT"],
             entity=config["WANDB_ENTITY"],
+            mode="offline",
             config=config,
             save_code=True,
         )
@@ -2183,17 +3403,23 @@ def main():
     print("Setting up environment...")
     letters = "abcdefghijkl"
 
-    env = JaxSimpleLTLEnv(letters=letters, timeout=75)
-    ltl_env = LTLEnv(env, env.default_params, progression_mode="full", intrinsic=0.0)
+    base_env = JaxSimpleLTLEnvDefault()
+    propositions = list(letters)
+    sampler=JaxUntilTaskSampler(propositions, min_levels=1, max_levels=3, min_conjunctions=1, max_conjunctions=2)
+    params=base_env.default_params
+    # Wrap the base env with the LTL wrapper
+    # Use intrinsic reward 0.0 for this test
+    ltl_env = LTLEnv(base_env, sampler, params, intrinsic=0.0)
+    
 
     # --- Algorithm and Model Setup ---
     print("Setting up model and algorithm...")
-    acmodel = ActorCritic(output_dim=env.default_params.num_letters)
+    acmodel = ActorCritic(output_dim=base_env.default_params.num_letters)
 
     # Instantiate the PPO algorithm with its hyperparameters
     algo = PPO(
         env=ltl_env,
-        env_params=env.default_params,
+        env_params=base_env.default_params,
         acmodel=acmodel,
         num_procs=config["NUM_PROCS"],
         num_frames_per_proc=config["NUM_FRAMES_PER_PROC"],
@@ -2217,7 +3443,7 @@ def main():
     reset_keys = jax.random.split(reset_key, config["NUM_PROCS"])
 
     # Get initial state
-    init_obs, init_env_state = vmapped_env_reset(reset_keys, env.default_params)
+    init_obs, init_env_state = vmapped_env_reset(reset_keys, base_env.default_params)
 
     # Initialize model parameters
     init_params = algo.acmodel.init(model_key, init_obs)['params']
@@ -2362,24 +3588,21 @@ def main():
                 
                 # 2. Get the JAX state for that proc from the *batched* rollout state
                 # This state is the *result* of the last rollout
-                current_ltl_env_state = jax.tree_util.tree_map(
+                current_ltl_env_state = jax.tree.util.tree.map(
                     lambda x: x[log_proc_id], rollout_state.env_state
                 )
-
+    
                 # 3. Get the last action (proposition) from the simple env state
                 last_action_id = int(current_ltl_env_state.env_state.proposition)
                 # Use the env's (non-JAX) map to get the string
-                action_str = env._letter_map.get(last_action_id, "None (at reset)")
-
-                # 4. Get the LTL formula array, root, and node count
-                ltl_array = np.array(current_ltl_env_state.ltl_goal)
-                ltl_root = int(current_ltl_env_state.root_idx)
-                ltl_nodes = int(current_ltl_env_state.num_nodes)
-
+                action_str = base_env._letter_map.get(last_action_id, "None (at reset)")
+    
+           
+    
                 # 5. Decode the array back into a readable string
                 # This uses the `decode_array_to_formula` function you provided
-                formula_str = str(decode_array_to_formula(ltl_array, ltl_root, ltl_nodes))
-                
+                formula_str = sampler.decode_formula(current_ltl_env_state.ltl_goal)
+               # print(formula_str)
                 # 6. Add to the wandb log dictionary
                 logs["example_last_action"] = action_str
                 logs["example_progressed_formula"] = formula_str
@@ -2425,6 +3648,61 @@ def main():
     if config["USE_WANDB"]:
         wandb.finish()
 
+def maino():
+    # 1. Initialize Environment
+    base_env = JaxSimpleLTLEnvDefault()
+    propositions = base_env.get_propositions()
+    sampler=JaxUntilTaskSampler(propositions, min_levels=1, max_levels=3, min_conjunctions=1, max_conjunctions=2)
+    params=base_env.default_params
+    # Wrap the base env with the LTL wrapper
+    # Use intrinsic reward 0.0 for this test
+    env = LTLEnv(base_env, sampler, params, intrinsic=0.0)
+    
+    # 2. Setup PRNG Key
+    key = jax.random.PRNGKey(42)
+    
+    # 3. Reset Environment
+    print("--- Initializing and Resetting Environment ---")
+    key, reset_key = jax.random.split(key)
+    obs, state = env.reset(reset_key, params)
+    print(sampler.decode_formula(state.ltl_goal))
+    
+    print("-" * 40)
 
+    # 4. Define a sequence of actions to test LTL logic
+    # Our goal is "p0 U p1" (action 0 U action 1)
+    #
+    # Action 0 ('p0'): p1 is False, p0 is True. Reward=0.0, Done=False. LTL goal remains "p0 U p1"
+    # Action 0 ('p0'): p1 is False, p0 is True. Reward=0.0, Done=False. LTL goal remains "p0 U p1"
+    # Action 1 ('p1'): p1 is True.           Reward=1.0, Done=True.  LTL goal becomes "True"
+    # Action 5 ('f'):  (This step will be a new episode)
+    #                  Reset samples "p0 U p1". 
+    #                  p1 is False, p0 is False. Reward=-1.0, Done=True. LTL goal becomes "False"
+    
+    actions_to_take = [0, 0, 1, 5,7,1,2,3,4,5,6,7,9,5,3,2,1]
+    
+    for i, action in enumerate(actions_to_take):
+        print(f"\n--- Step {i+1} ---")
+        
+        # Split key for the step
+        key, step_key = jax.random.split(key)
+        
+        print(f"Taking Action: {action}")
+        
+        # Get the underlying proposition string (non-JIT)
+        prop_str = base_env._letter_map.get(action, "None")
+        print(f"  (Proposition '{prop_str}')")
+        
+        # Perform the step
+        obs, reward, done, info, state = env.step(step_key, state, action, params)
+        
+        print(f"  Reward Received: {reward}")
+        print(f"  Done Flag: {done}")
+        print(sampler.decode_formula(state.ltl_goal))
+
+        if done:
+            print("\n  *** Episode Finished (Done=True) ***")
+            print("  The 'Next Obs' and 'Next State' are from a fresh reset.")
+            print("  The LTL goal for the next step is 'p0 U p1' again.")
 if __name__ == "__main__":
     main()
