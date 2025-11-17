@@ -239,12 +239,13 @@ def main(config):
                 mask_done = jnp.where(done_idxs == max_steps, 0, 1)
                 ep_return, success, collision, timeo, length = __ep_outcomes(jnp.concatenate([jnp.array([-1]), done_idxs[:-1]]), done_idxs)        
                         
-                return {"ep_return": ep_return.mean(where=mask_done),
-                        "num_episodes": mask_done.sum(),
+                return {
+                        # "ep_return": ep_return.mean(where=mask_done),
+                        # "num_episodes": mask_done.sum(),
                         "success_rate": success.mean(where=mask_done),
-                        "collision_rate": collision.mean(where=mask_done),
-                        "timeout_rate": timeo.mean(where=mask_done),
-                        "ep_len": length.mean(where=mask_done),
+                        # "collision_rate": collision.mean(where=mask_done),
+                        # "timeout_rate": timeo.mean(where=mask_done),
+                        # "ep_len": length.mean(where=mask_done),
                         }
             
             # sample envs
@@ -401,7 +402,7 @@ def main(config):
         
         reward_by_env = traj_batch.reward
         episodic_return_length = _calc_ep_return_by_agent(traj_batch.done, reward_by_env)
-        episodic_return_length = jax.tree_map(lambda x: x.mean(), episodic_return_length)
+        episodic_return_length = jax.tree_map(lambda x: jnp.nanmean(x), episodic_return_length)
         # CALCULATE ADVANTAGE
         train_state, env_state, start_state, last_obs, last_done,  update_steps, rng = runner_state
         last_obs_batch = last_obs # batchify(last_obs, env.agents, t_config["NUM_ACTORS"])
@@ -574,25 +575,25 @@ def main(config):
         )
         rng = update_state[-1]
 
-        # def callback(metric):
-        #     wandb.log(
-        #         {
-        #             # "train-term": metric["terminations"],
-        #             #"reward": metric["returned_episode_returns"],
+        def callback(metric):
+            wandb.log(
+                {
+                    # "train-term": metric["terminations"],
+                    #"reward": metric["returned_episode_returns"],
                     
-        #             # "eval-collision": metric["test-metrics"]["collision-by-env"].mean(),
-        #             # "eval-timeout": metric["test-metrics"]["timeout-by-env"].mean(),
-        #             "env_step": metric["update_steps"]
-        #                 * t_config["NUM_ENVS"]
-        #                 * t_config["NUM_STEPS"],
-        #             # "dormancy/": metric["dormancy"],
-        #             # "env-metrics/": metric["env-metrics"],
-        #             # "mean_ued_score": metric["mean_ued_score"],
-        #             **metric["episodic_return_length"],
-        #             **metric["loss_info"],
-        #             # "mean_lambda_val": metric["mean_lambda_val"],
-        #         }
-        #     )
+                    # "eval-collision": metric["test-metrics"]["collision-by-env"].mean(),
+                    # "eval-timeout": metric["test-metrics"]["timeout-by-env"].mean(),
+                    "env_step": metric["update_steps"]
+                        * t_config["NUM_ENVS"]
+                        * t_config["NUM_STEPS"],
+                    # "dormancy/": metric["dormancy"],
+                    # "env-metrics/": metric["env-metrics"],
+                    # "mean_ued_score": metric["mean_ued_score"],
+                    **metric["episodic_return_length"],
+                    **metric["loss_info"],
+                    # "mean_lambda_val": metric["mean_lambda_val"],
+                }
+            )
 
         dormancy_log = {
             # "actor": dormancy.actor,
@@ -655,7 +656,7 @@ def main(config):
             metric["level_stats"] = {}
             # print("Warning: 'next_levels_batch' object does not have .num_conjuncts or .avg_levels")
         
-        #jax.experimental.io_callback(callback, None, metric)
+        jax.experimental.io_callback(callback, None, metric)
 
         
         start_state = env_state
@@ -681,7 +682,7 @@ def main(config):
             # env.init_render(ax, state, lidar=False, ticks_off=True)
             ax.imshow(img)
             ax.set_xticks([]); ax.set_yticks([])
-            ax.set_title(f"Score: {score:.2f}\n{string_formula}", fontsize=3) 
+            ax.set_title(f"Score: {score:.2f}\n{string_formula}", fontsize=5) 
             ax.axis('off') # Hide axis ticks and labels
             
         return wandb.Image(fig)
@@ -726,7 +727,7 @@ def main(config):
         _rng = jax.random.split(_rng, 20)
         _, top_states = jax.vmap(env.reset_to_level)(_rng, top_instances)
         
-        return runner_state, (learnabilty_scores.at[-20:].get(), top_states), train_metrics_stack, test_metrics
+        return runner_state, (learnabilty_scores.at[-20:].get(), top_states), test_metrics
     
     rng, _rng = jax.random.split(rng)
     runner_state = (
@@ -742,16 +743,16 @@ def main(config):
     for eval_step in range(int(t_config["NUM_UPDATES"] // t_config["EVAL_FREQ"])):
         start_time = time.time()
         rng, eval_rng = jax.random.split(rng)
-        runner_state, instances, train_metrics_stack, metrics = train_and_eval_step(runner_state, eval_rng)
+        runner_state, instances, metrics = train_and_eval_step(runner_state, eval_rng)
         jax.block_until_ready(runner_state)
         curr_time = time.time()
         current_update = metrics["update_count"]
         start_update = current_update - t_config["EVAL_FREQ"]
-        for i in range(t_config["EVAL_FREQ"]):
-            # Get the metric for step `i` from the stack
-            step_metric = jax.tree_map(lambda x: x[i], train_metrics_stack)
-            # Log it at the correct, individual step number
-            wandb.log(step_metric, step=(start_update + i))
+        # for i in range(t_config["EVAL_FREQ"]):
+        #     # Get the metric for step `i` from the stack
+        #     step_metric = jax.tree_map(lambda x: x[i], train_metrics_stack)
+        #     # Log it at the correct, individual step number
+        #     wandb.log(step_metric, step=(start_update + i))
         map_image=log_buffer(*instances, metrics["update_count"])
         metrics["maps"] = map_image
         metrics['time_delta'] = curr_time - start_time

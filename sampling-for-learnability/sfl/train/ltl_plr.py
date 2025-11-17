@@ -738,7 +738,6 @@ def main(config):
         
         for s in ['dr', 'replay', 'mutation']:
             if train_state_info['info'][f'num_{s}_updates'] > 0:
-                print(s,"WRGJBJWHGFUAHGUOòebflwGWeghihgiwh")
                 
                 # stats[f"{s}_levels"] is now a batched tuple (a PyTree):
                 images_batch, enc_strs_batch = stats[f"{s}_levels"]
@@ -876,14 +875,18 @@ def main(config):
             )
             ep_stats = _calc_ep_return_by_agent(dones, rewards, config["GAMMA"], config["NUM_STEPS"])
             # ep_stats is a dict of arrays (size B), so mean them for this step
-            ep_stats = jax.tree_map(lambda x: x.mean(), ep_stats)
-            
-            metrics = {
-                "losses": jax.tree_map(lambda x: x.mean(), losses),
+            ep_stats=jax.tree_map(lambda x: x.mean(), ep_stats)
+            conj_levels={
                 "mean_num_conjs": new_levels.num_conjuncts.mean(),
                 "mean_avg_levels": new_levels.avg_levels.mean(),
-                **ep_stats,
+            } 
+            metrics = {
+                "losses": jax.tree_map(lambda x: x.mean(), losses),
             }
+            metrics.update(ep_stats)
+            
+            if config["EXPLORATORY_GRAD_UPDATES"]:
+                metrics.update(conj_levels)
             
             train_state = train_state.replace(
                 sampler=sampler,
@@ -943,8 +946,8 @@ def main(config):
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
                 "mean_num_conjs": levels.num_conjuncts.mean(),
                 "mean_avg_levels": levels.avg_levels.mean(),
-                **ep_stats,
             }
+            metrics.update(ep_stats)
             
             train_state = train_state.replace(
                 sampler=sampler,
@@ -1002,15 +1005,14 @@ def main(config):
             )
             ep_stats = _calc_ep_return_by_agent(dones, rewards, config["GAMMA"], config["NUM_STEPS"])
             # ep_stats is a dict of arrays (size B), so mean them for this step
-            ep_stats = jax.tree_map(lambda x: x.mean(), ep_stats)
-            
+            ep_stats=jax.tree_map(lambda x: x.mean(), ep_stats)
+           
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
                 "mean_num_conjs": child_levels.num_conjuncts.mean(),
                 "mean_avg_levels": child_levels.avg_levels.mean(),
-                **ep_stats,
             }
-            
+            metrics.update(ep_stats)
             train_state = train_state.replace(
                 sampler=sampler,
                 update_state=UpdateState.DR,

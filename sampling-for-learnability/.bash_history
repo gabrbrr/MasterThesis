@@ -320,3 +320,160 @@ python3 check_progress.py
 python3 check_progress.py
 python3 check_progress.py
 exit
+exit
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+ls
+ls
+python3 check_progress.py
+ls
+rm -rf .local
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+python3 check_progress.py
+ls
+exit
+exit
+exit
+python3 check_eventually.py
+exit
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+pip show jax
+pip install flax
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+python3 ltlbootcamp.py
+exit
+python3 ltlbootcamp.py
+exit
+ls
+cd sfl
+cd train
+ls
+python3 ltl_plr.py
+python3 ltl_plr.py
+python3 ltl_plr.py
+exit
+ls
+cd sfl
+cd train
+ls
+python3 ltl_plr.py
+pip show jax
+pip install "jax==0.4.34
+pip install "jax==0.4.34"
+python3 ltl_plr.py
+pip install --upgrade flax
+python3 ltl_plr.py
+exit
+ls
+cd sfl
+cd train
+python3 ltl_plr.py
+unset --xla_gpu_enable_async_all_gather
+unset xla_gpu_enable_async_all_gather
+unset xla_gpu_enable_async_reduce_scatter
+python3 ltl_plr.py
+unset XLA_FLAGS
+python3 ltl_plr.py
+pip install "jax==0.4.25"
+python3 ltl_plr.py
+pip install "jaxlib==0.4.25"
+python3 ltl_plr.py
+exit
+rm -rf .local 
+cd sfl
+cd train
+python3 ltl_plr.py
+pip install distrax
+python3 ltl_plr.py
+pip install "tqdm>=4.66.0"
+python3 ltl_plr.py
+pip install wandb
+python3 ltl_plr.py
+pip show jax
+pip install "orbax-checkpoint==0.5.3"
+python3 ltl_plr.py
+make push
+cd ..
+cd ..
+make push
+dockr images
+docker images
+exit
+cd sfl
+cd train
+python3 ltl_plr.py
+exit
+ls
+cd sfl
+cd train
+ls
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+python3 ltl_sfl.py
+exit
+cd sfl
+cd train
+ls
+python3 ltl_plr.py
+python3 ltl_plr.py
+pip show jax
+exit
+cd sfl
+cd train
+python3 ltl_plr.py
+rm -rf checkpoints
+ls
+ls
+python3 ltl_plr.py
+pip install "jax==0.4.35"
+exit
