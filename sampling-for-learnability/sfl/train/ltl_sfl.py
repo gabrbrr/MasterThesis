@@ -21,11 +21,14 @@ import time
 from PIL import Image
 import wandb
 import matplotlib.pyplot as plt
-from sfl.envs.ltl_env.utils import *
 from jaxued.wrappers import AutoReplayWrapper
 from sfl.envs.ltl_env.letter_env_wrap import Level, make_level_generator, LTLEnv, make_level_mutator_minimax
+from sfl.envs.ltl_env.until_sampler import JaxUntilTaskSampler
+from sfl.envs.ltl_env.eventually_sampler import JaxEventuallyTaskSampler
 from sfl.envs.ltl_env.renderer import LTLEnvRenderer
 from sfl.train.train_utils import save_params
+from sfl.envs.ltl_env.letter_env import LetterEnv
+import os
 
 class Transition(NamedTuple):
     global_done: jnp.ndarray
@@ -75,14 +78,23 @@ def main(config):
         config=config,
         mode=config["WANDB_MODE"],
     )
-        
+    sampler_args=config["env"]["level_generators"]["SIMPLE_AVOIDANCE"]
     rng = jax.random.PRNGKey(config["SEED"])
     print(config["learning"]["NUM_ENVS_FROM_SAMPLED"],config["learning"]["NUM_ENVS_TO_GENERATE"])
     assert (config["learning"]["NUM_ENVS_FROM_SAMPLED"] +  config["learning"]["NUM_ENVS_TO_GENERATE"]) == config["learning"]["NUM_ENVS"]
     
-    env = LTLEnv(grid_size=7, letters="aabbccddeeffgghhiijjkkll", use_fixed_map=False, use_agent_centric_view=True)
+    props=list(config["env"]["env"]["letters"])
+    if sampler_args["sampler"] == "avoidance":
+        ltl_sampler = JaxUntilTaskSampler(sorted(props),**sampler_args["types"])
+    elif sampler_args["sampler"] == "partially_ordered":
+        ltl_sampler = JaxEventuallyTaskSampler(sorted(props),**sampler_args["types"])
+  
+
+    base_env=LetterEnv(**config["env"]["env"])
+    env = LTLEnv(base_env, ltl_sampler)
     eval_env = env
-    sample_random_level = make_level_generator(**config["env"]["level_generators"]["SIMPLE_AVOIDANCE"])
+    env_params=env.default_params
+    sample_random_level = make_level_generator(base_env, ltl_sampler)
     env_renderer = LTLEnvRenderer(env, tile_size=8)
     env = AutoReplayWrapper(env)
     t_config = config["learning"]
@@ -262,14 +274,14 @@ def main(config):
             done_by_env = traj_batch.done.reshape((-1, config["BATCH_SIZE"]))
             reward_by_env = traj_batch.reward.reshape((-1, config["BATCH_SIZE"]))
             info_by_actor = jax.tree_map(lambda x: x.swapaxes(2, 1).reshape((-1, BATCH_ACTORS)), traj_batch.info)
-            print('done_by_env', done_by_env.shape)
-            print('reward_by_env', reward_by_env.shape)
-            print('info_by_actor', info_by_actor)
+            # print('done_by_env', done_by_env.shape)
+            # print('reward_by_env', reward_by_env.shape)
+            # print('info_by_actor', info_by_actor)
             o = _calc_outcomes_by_agent(config["ROLLOUT_STEPS"], traj_batch.done, traj_batch.reward, info_by_actor)
-            print('o', o)
+            # print('o', o)
             success_by_env = o["success_rate"].reshape((1, config["BATCH_SIZE"]))
             learnability_by_env = (success_by_env * (1 - success_by_env)).sum(axis=0)
-            print('learnability_by_env', learnability_by_env)
+            # jax.debug.print("OOOOOOOOOOOOOO {x} and LEARNABILITYYYYYYYYY {y}   done {z}   reward= {u}",x=o,y=learnability_by_env, z=done_by_env, u=reward_by_env )
             return None, (learnability_by_env, env_instances)
             
         rngs = jax.random.split(rng, config["NUM_BATCHES"])
@@ -562,25 +574,25 @@ def main(config):
         )
         rng = update_state[-1]
 
-        def callback(metric):
-            wandb.log(
-                {
-                    # "train-term": metric["terminations"],
-                    #"reward": metric["returned_episode_returns"],
+        # def callback(metric):
+        #     wandb.log(
+        #         {
+        #             # "train-term": metric["terminations"],
+        #             #"reward": metric["returned_episode_returns"],
                     
-                    # "eval-collision": metric["test-metrics"]["collision-by-env"].mean(),
-                    # "eval-timeout": metric["test-metrics"]["timeout-by-env"].mean(),
-                    "env_step": metric["update_steps"]
-                        * t_config["NUM_ENVS"]
-                        * t_config["NUM_STEPS"],
-                    # "dormancy/": metric["dormancy"],
-                    # "env-metrics/": metric["env-metrics"],
-                    # "mean_ued_score": metric["mean_ued_score"],
-                    **metric["episodic_return_length"],
-                    **metric["loss_info"],
-                    # "mean_lambda_val": metric["mean_lambda_val"],
-                }
-            )
+        #             # "eval-collision": metric["test-metrics"]["collision-by-env"].mean(),
+        #             # "eval-timeout": metric["test-metrics"]["timeout-by-env"].mean(),
+        #             "env_step": metric["update_steps"]
+        #                 * t_config["NUM_ENVS"]
+        #                 * t_config["NUM_STEPS"],
+        #             # "dormancy/": metric["dormancy"],
+        #             # "env-metrics/": metric["env-metrics"],
+        #             # "mean_ued_score": metric["mean_ued_score"],
+        #             **metric["episodic_return_length"],
+        #             **metric["loss_info"],
+        #             # "mean_lambda_val": metric["mean_lambda_val"],
+        #         }
+        #     )
 
         dormancy_log = {
             # "actor": dormancy.actor,
@@ -662,22 +674,19 @@ def main(config):
             score = learnability[i]            
             state = jax.tree_map(lambda x: x[i], states)
 
-            img, encoded_formula, root_id, num_nodes = env_renderer.render_state(
+            img, encoded_formula = env_renderer.render_state(
                 state.env_state, env.default_params
             )
+            string_formula=ltl_sampler.decode_formula(encoded_formula)
             # env.init_render(ax, state, lidar=False, ticks_off=True)
             ax.imshow(img)
-            string_formula = decode_array_to_formula(encoded_formula, root_id, num_nodes)
             ax.set_xticks([]); ax.set_yticks([])
-            ax.set_title(f'learnability: {score:.3f}\nformula: {string_formula}')
-            ax.set_aspect('equal', 'box')
-                        
-        plt.tight_layout()
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-        im = Image.frombytes('RGB', fig.canvas.get_width_height(), renderer.buffer_rgba()) 
-        plt.close(fig)
-        return wandb.Image(im)
+            ax.set_title(f"Score: {score:.2f}\n{string_formula}", fontsize=3) 
+            ax.axis('off') # Hide axis ticks and labels
+            
+        return wandb.Image(fig)
+
+ 
     @jax.jit
     def train_and_eval_step(runner_state, eval_rng):
         
@@ -730,15 +739,12 @@ def main(config):
         _rng,
     )
     checkpoint_steps = t_config["NUM_UPDATES"] // t_config["EVAL_FREQ"] // t_config["NUM_CHECKPOINTS"]
-    print('eval freq', t_config["EVAL_FREQ"])
     for eval_step in range(int(t_config["NUM_UPDATES"] // t_config["EVAL_FREQ"])):
         start_time = time.time()
         rng, eval_rng = jax.random.split(rng)
         runner_state, instances, train_metrics_stack, metrics = train_and_eval_step(runner_state, eval_rng)
         jax.block_until_ready(runner_state)
         curr_time = time.time()
-        map_image=log_buffer(*instances, metrics["update_count"])
-        metrics["maps"] = map_image
         current_update = metrics["update_count"]
         start_update = current_update - t_config["EVAL_FREQ"]
         for i in range(t_config["EVAL_FREQ"]):
@@ -746,6 +752,8 @@ def main(config):
             step_metric = jax.tree_map(lambda x: x[i], train_metrics_stack)
             # Log it at the correct, individual step number
             wandb.log(step_metric, step=(start_update + i))
+        map_image=log_buffer(*instances, metrics["update_count"])
+        metrics["maps"] = map_image
         metrics['time_delta'] = curr_time - start_time
         metrics["steps_per_section"] = (t_config["EVAL_FREQ"] * t_config["NUM_STEPS"] * t_config["NUM_ENVS"]) / metrics['time_delta']
         wandb.log(metrics, step=metrics["update_count"])

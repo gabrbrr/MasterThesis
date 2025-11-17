@@ -25,14 +25,14 @@ from typing import NamedTuple, Tuple, List, Dict, Any, Union
 from functools import partial
 import numpy as np
 import matplotlib.pyplot as plt
-import networkx as nx
+#import networkx as nx
 import re
 import random as py_random
 from jax import random
 from functools import partial
 from collections import OrderedDict
-import graphviz
-from PIL import Image, ImageDraw, ImageFont
+#import graphviz
+#from PIL import Image, ImageDraw, ImageFont
 import os
 
 def ltl_tuple_to_string( ltl_tuple):
@@ -1333,14 +1333,14 @@ from typing import NamedTuple, Tuple, List, Dict, Any, Union
 from functools import partial
 import numpy as np
 import matplotlib.pyplot as plt
-import networkx as nx
+#import networkx as nx
 import re
 import matplotlib.pyplot as plt
-import graphviz
-from PIL import Image, ImageDraw, ImageFont
+#import graphviz
+#from PIL import Image, ImageDraw, ImageFont
 import sys
 import os
-import io
+#import io
 
 
 
@@ -3062,7 +3062,7 @@ class BaseAlgo(ABC):
         exps_dict = {key: experiences[key] for key in keys_to_keep}
 
         # Reshape data to (num_procs * num_frames_per_proc, ...) for the update step
-        exps = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1).reshape(-1, *x.shape[2:]), exps_dict)
+        exps = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1).reshape(-1, *x.shape[2:]), exps_dict)
 
         jax_logs = {
             "ep_return_at_done": experiences['ep_return_at_done'],
@@ -3241,11 +3241,11 @@ class PPO(BaseAlgo):
             # Shuffle the experience data at the start of each epoch
             r, perm_key = jax.random.split(r)
             permutation = jax.random.permutation(perm_key, self.num_frames)
-            shuffled_exps = jax.tree.map(lambda x: x[permutation], exps)
+            shuffled_exps = jax.tree_map(lambda x: x[permutation], exps)
 
             # Reshape data into minibatches
             num_minibatches = self.num_frames // self.batch_size
-            minibatches = jax.tree.map(
+            minibatches = jax.tree_map(
                 lambda x: x.reshape((num_minibatches, self.batch_size) + x.shape[1:]),
                 shuffled_exps
             )
@@ -3357,7 +3357,7 @@ def main():
     # --- Hyperparameters ---
     config = {
         "LR": 1e-3,
-        "NUM_PROCS": 16, # Increased for more parallel data
+        "NUM_PROCS": 32, # Increased for more parallel data
         "NUM_FRAMES_PER_PROC": 256,
         "DISCOUNT": 0.9,
         "GAE_LAMBDA": 0.5,
@@ -3389,7 +3389,7 @@ def main():
         wandb.init(
             project=config["WANDB_PROJECT"],
             entity=config["WANDB_ENTITY"],
-            mode="offline",
+            mode="online",
             config=config,
             save_code=True,
         )
@@ -3588,7 +3588,7 @@ def main():
                 
                 # 2. Get the JAX state for that proc from the *batched* rollout state
                 # This state is the *result* of the last rollout
-                current_ltl_env_state = jax.tree.util.tree.map(
+                current_ltl_env_state = jax.tree_util.tree_map(
                     lambda x: x[log_proc_id], rollout_state.env_state
                 )
     

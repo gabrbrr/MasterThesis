@@ -9,6 +9,8 @@ defaults:
 "ENTITY": ""
 "PROJECT": "letter"
 "WANDB_MODE" : "online"
-"SAVE_PATH": "checkpoints/new_letter"
-"CHECKPOINT_SAVE_INTERVAL": 1
+"SAVE_PATH": "./checkpoints/new_letter"
+"CHECKPOINT_SAVE_INTERVAL" : 5
+"max_number_of_checkpoints": 5
 "run_name": "letter-plr-run"
+"seed": 42

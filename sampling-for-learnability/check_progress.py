@@ -6,7 +6,7 @@ import logging
 import random
 
 
-def simplify_until(formula):
+def simplify(formula):
     """
     Recursively simplifies an LTL formula tuple.
     Applies associativity and idempotency for 'and'/'or'.
@@ -68,7 +68,7 @@ def simplify_until(formula):
         return (op,) + tuple(operands)
 
 
-def simplify(formula):
+def simplify_ev(formula):
 
     """
 
@@ -603,7 +603,189 @@ class EventuallySampler(LTLSampler):
             return ('eventually',term)
         return ('eventually',('and', term, self._get_sequence(seq[1:])))
 
+def get_conjuncts(ltl_tuple):
+    """
+    Collects all top-level conjuncts from a nested 'and' tuple.
+    Example: (and, A, (and, B, C)) -> [A, B, C]
+    """
+    conjuncts = []
+    
+    def collect(t):
+        if isinstance(t, tuple) and t[0] == 'and':
+            collect(t[1])
+            collect(t[2])
+        else:
+            conjuncts.append(t)
+            
+    collect(ltl_tuple)
+    return conjuncts
 
+def build_and_tuple(conj_list):
+    """
+    Builds a right-nested 'and' tuple from a list of conjuncts.
+    Example: [A, B, C] -> (and, A, (and, B, C))
+    """
+    if not conj_list:
+        return "True"  # Logical true
+    if len(conj_list) == 1:
+        return conj_list[0]
+        
+    # Build from right to left
+    result = conj_list[-1]
+    for i in range(len(conj_list) - 2, -1, -1):
+        result = ('and', conj_list[i], result)
+    return result
+
+def flatten_eventually_task(task_tuple):
+    """
+    Converts a nested 'eventually' task into a sequence of its components.
+    This is now commutative and does not assume the order of 'and' operands.
+    
+    Example: F(a & F(b & F(c))) -> ['a', 'b', 'c']
+    Example: F(F(b & F(c)) & a) -> ['a', 'b', 'c']
+    Example: F(a & F((b|h) & F(c))) -> ['a', ('or', 'b', 'h'), 'c']
+    """
+    if not isinstance(task_tuple, tuple) or task_tuple[0] != 'eventually':
+        return None  # Not a processable task
+
+    seq = []
+    current = task_tuple[1]  # The part inside the first F(...)
+    
+    while True:
+        if isinstance(current, tuple) and current[0] == 'and':
+            op1 = current[1]
+            op2 = current[2]
+            
+            op1_is_f = isinstance(op1, tuple) and op1[0] == 'eventually'
+            op2_is_f = isinstance(op2, tuple) and op2[0] == 'eventually'
+            
+            if op1_is_f and not op2_is_f:
+                # Case: F(...) & term
+                term = op2
+                rest = op1
+            elif not op1_is_f and op2_is_f:
+                # Case: term & F(...)
+                term = op1
+                rest = op2
+            else:
+                # Ambiguous or final case: (term1 & term2) or (F(...) & F(...))
+                # We treat both as terms and end the sequence.
+                seq.append(op1)
+                seq.append(op2)
+                break
+                
+            # We found a term and a rest, add term to sequence
+            seq.append(term)
+            # and continue loop with the content of the nested F
+            current = rest[1] 
+
+        else:
+            # This is a simple F(a) or the last term in a chain
+            seq.append(current)
+            break
+            
+    return seq
+
+def get_props_from_element(e):
+    """
+    Gets the set of propositions from a sequence element.
+    Example: 'a' -> {'a'}
+    Example: ('or', 'a', 'b') -> {'a', 'b'}
+    """
+    if not isinstance(e, tuple):
+        return {e}
+    if e[0] == 'or':
+        # Assumes sampler only creates 1-level 'or's
+        return {e[1], e[2]}
+    # Treat other tuple types (like 'and') as opaque blocks if they appear
+    return {e} 
+
+def element_m_implies_n(e_m, e_n):
+    """
+    Checks if element 'm' (stronger) implies element 'n' (weaker).
+    This is true if the propositions in 'm' are a subset of 'n'.
+    Example: 'a' implies 'a'.
+    Example: 'a' implies ('or', 'a', 'b').
+    Example: ('or', 'a', 'b') does NOT imply 'a'.
+    """
+    props_m = get_props_from_element(e_m)
+    props_n = get_props_from_element(e_n)
+    return props_m.issubset(props_n)
+
+def does_m_imply_n(seq_m, seq_n):
+    """
+    Checks if task 'm' (stronger) implies task 'n' (weaker).
+    This is true if seq_n is a "sub-sequence" of seq_m,
+    where each element also implies the corresponding one.
+    
+    seq_m: The sequence from the (potentially) stronger formula.
+    seq_n: The sequence from the (potentially) weaker formula.
+    """
+    i = 0  # Index for seq_n
+    j = 0  # Index for seq_m
+    
+    while i < len(seq_n) and j < len(seq_m):
+        e_n = seq_n[i]
+        e_m = seq_m[j]
+        
+        if element_m_implies_n(e_m, e_n):
+            # Found a match for e_n, move to the next element in seq_n
+            i += 1
+        
+        # Always move to the next element in seq_m to continue the search
+        j += 1
+        
+    # We succeeded if we found all elements of seq_n
+    return i == len(seq_n)
+
+def simplify_conjunctions(ltl_tuple):
+    """
+    Applies the "eventually task" subsumption rule to a conjunction.
+    
+    Removes any task 'n' if there exists another task 'm'
+    such that 'm' logically implies 'n'.
+    """
+    if not (isinstance(ltl_tuple, tuple) and ltl_tuple[0] == 'and'):
+        # Not a top-level conjunction, nothing to simplify
+        return ltl_tuple
+        
+    all_conjuncts = get_conjuncts(ltl_tuple)
+    
+    # Flatten all 'eventually' tasks
+    flat_tasks = []
+    for conj in all_conjuncts:
+        seq = flatten_eventually_task(conj)
+        if seq:
+            flat_tasks.append( (conj, seq) )
+            
+    # Other conjuncts that aren't 'eventually' tasks
+    other_conjuncts = [c for c in all_conjuncts 
+                       if not any(c is ft[0] for ft in flat_tasks)]
+    
+    to_remove = set()
+    
+    # Compare every task 'm' (stronger) with every task 'n' (weaker)
+    for (conj_m, seq_m) in flat_tasks:
+        for (conj_n, seq_n) in flat_tasks:
+            if conj_m is conj_n:
+                continue
+                
+            if (conj_n in to_remove):
+                continue # Already marked for removal
+                
+            # Check if m implies n
+            if does_m_imply_n(seq_m, seq_n):
+                # 'm' is stronger than 'n'.
+                # In (A & B), if A -> B, then (A & B) == A.
+                # We remove B (the weaker one, 'n').
+                to_remove.add(conj_n)
+
+    # Reconstruct the formula
+    final_tasks = [ft[0] for ft in flat_tasks if ft[0] not in to_remove]
+    final_conjuncts = other_conjuncts + final_tasks
+    
+    return build_and_tuple(final_conjuncts)
+    
 def get_propositions_in_formula(ltl_formula):
     """
     Recursively finds all unique propositions (atomic strings)
@@ -711,17 +893,17 @@ def test_sampler():
     """
     # This list is now just used for *sampling*
     propositions_for_sampling = ['a', 'b', 'c','d','e','f','g','h','i','j','k','l']
-    sampler = EventuallySampler(propositions_for_sampling, 
+    # sampler = EventuallySampler(propositions_for_sampling, 
+    #                             min_levels=3, 
+    #                             max_levels=3, 
+    #                             min_conjunctions=3, 
+    #                             max_conjunctions=3)
+
+    sampler= UntilTaskSampler(propositions_for_sampling, 
                                 min_levels=2, 
                                 max_levels=2, 
-                                min_conjunctions=2, 
+                                min_conjunctions=2 ,
                                 max_conjunctions=2)
-
-    # sampler= UntilTaskSampler(propositions_for_sampling, 
-    #                             min_levels=2, 
-    #                             max_levels=2, 
-    #                             min_conjunctions=3 ,
-    #                             max_conjunctions=3)
 
     
     
@@ -756,8 +938,8 @@ def test_sampler():
             logging.info(f"  -> Progressing with {ta}:")
             
             try:
-                # 1. Get the raw progressed formula
-                custom_progressed_formula = progress_eventually(current_formula, ta)
+                # # 1. Get the raw progressed formula
+                # custom_progressed_formula = progress_eventually(current_formula, ta)
                 true_progressed_formula= progress(current_formula, ta)
                 
 
@@ -766,21 +948,22 @@ def test_sampler():
                 f = spot.simplify(f)
                 ltl_spot = f.__format__("l")
                 true_simplified_formula,r = _get_std_format(ltl_spot.split(' '))
-                custom_simplified_formula= simplify(custom_progressed_formula)
+                # custom_simplified_formula= simplify(custom_progressed_formula)
+                # custom_simplified_formula=simplify_conjunctions(custom_simplified_formula)
 
                 # 3. Check if simplification occurred
-                can_custom_formula=canonical_form(custom_simplified_formula)
-                can_true_formula=canonical_form(true_simplified_formula)
-                if  can_custom_formula!= can_true_formula:
+                # can_custom_formula=canonical_form(custom_simplified_formula)
+               # can_true_formula=canonical_form(true_simplified_formula)
+                # if  can_custom_formula!= can_true_formula:
                     #     print("    [DIFFERENT SIMPLIFICATION DETECTED! ]")
                     
                     # logging.info(f"      Not complete: {ltl_tuple_to_string(progressed_formula)}")
                     # logging.info(f"      Complete:  {ltl_tuple_to_string(simplified_formula)}")
-                    logging.info(f"      custom simplification: {ltl_tuple_to_string(can_custom_formula)}")
-                    logging.info(f"      true simplification :  {ltl_tuple_to_string(can_true_formula)}")
-                else:
-                    logging.info(f"      simplification is same which is : {ltl_tuple_to_string(custom_simplified_formula)}")
-                current_formula=can_true_formula
+                    # logging.info(f"      custom simplification: {ltl_tuple_to_string(can_custom_formula)}")
+                logging.info(f"      true simplification :  {ltl_tuple_to_string(true_simplified_formula)}")
+                # else:
+                #     logging.info(f"      simplification is same which is : {ltl_tuple_to_string(custom_simplified_formula)}")
+                current_formula=true_simplified_formula
                     
             except Exception as e:
                 print(f"     [ERROR] Error progressing formula: {e}")

@@ -14,14 +14,14 @@ from typing import NamedTuple, Tuple, List, Dict, Any, Union
 from functools import partial
 import numpy as np
 import matplotlib.pyplot as plt
-import networkx as nx
+#import networkx as nx
 import re
 import matplotlib.pyplot as plt
-import graphviz
-from PIL import Image, ImageDraw, ImageFont
+#import graphviz
+#from PIL import Image, ImageDraw, ImageFont
 import sys
 import os
-import io
+#import io
 
 
 
@@ -32,10 +32,6 @@ class AstBuildState(NamedTuple):
     edge_types: jnp.ndarray  # (MAX_EDGES,)
     node_idx: jnp.ndarray    # Scalar array, (1,)
     edge_idx: jnp.ndarray    # Scalar array, (1,)
-
-
-
-
 
 
 class JaxEventuallyTaskSampler:
@@ -855,41 +851,41 @@ class JaxEventuallyTaskSampler:
         # --- Unary Operators (1 operand) ---
         if operator == 'not':
             # Format: !(operand)
-            operand_str = ltl_tuple_to_string(ltl_tuple[1])
+            operand_str = self.ltl_tuple_to_string(ltl_tuple[1])
             return f"!({operand_str})"
             
         elif operator == 'eventually':
             # Format: F(operand)
-            operand_str = ltl_tuple_to_string(ltl_tuple[1])
+            operand_str = self.ltl_tuple_to_string(ltl_tuple[1])
             return f"F({operand_str})"
             
         elif operator == 'globally':
             # Format: G(operand)
-            operand_str = ltl_tuple_to_string(ltl_tuple[1])
+            operand_str = self.ltl_tuple_to_string(ltl_tuple[1])
             return f"G({operand_str})"
             
         elif operator == 'next':
             # Format: X(operand)
-            operand_str = ltl_tuple_to_string(ltl_tuple[1])
+            operand_str = self.ltl_tuple_to_string(ltl_tuple[1])
             return f"X({operand_str})"
 
         # --- Binary Operators (2 operands) ---
         elif operator == 'and':
             # Format: (left & right)
-            left_str = ltl_tuple_to_string(ltl_tuple[1])
-            right_str = ltl_tuple_to_string(ltl_tuple[2])
+            left_str = self.ltl_tuple_to_string(ltl_tuple[1])
+            right_str = self.ltl_tuple_to_string(ltl_tuple[2])
             return f"({left_str} & {right_str})"
             
         elif operator == 'or':
             # Format: (left | right)
-            left_str = ltl_tuple_to_string(ltl_tuple[1])
-            right_str = ltl_tuple_to_string(ltl_tuple[2])
+            left_str = self.ltl_tuple_to_string(ltl_tuple[1])
+            right_str = self.ltl_tuple_to_string(ltl_tuple[2])
             return f"({left_str} | {right_str})"
             
         elif operator == 'until':
             # Format: (left U right)
-            left_str = ltl_tuple_to_string(ltl_tuple[1])
-            right_str = ltl_tuple_to_string(ltl_tuple[2])
+            left_str = self.ltl_tuple_to_string(ltl_tuple[1])
+            right_str = self.ltl_tuple_to_string(ltl_tuple[2])
             return f"({left_str} U {right_str})"
             
         # Fallback for any unknown operator
@@ -1103,177 +1099,3 @@ class JaxEventuallyTaskSampler:
             return None
         finally:
             plt.close(fig)
-
-def main():
-    """
-    Test main function to:
-    1. Sample a task.
-    2. Progress it randomly for several steps, **sampling ONE letter at a time**.
-    3. Build the AST for each step.
-    4. Decode the formula for each step.
-    5. Save a grid of the ASTs showing the progression.
-    """
-    
-    # --- 1. Setup ---
-    print("Setting up sampler...")
-    PROPS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j','l','m']
-    MAX_LEVELS = 5
-    MAX_CONJUNCTIONS = 5
-    NUM_STEPS = 40 # Max number of steps to show
-    
-    # Image grid settings
-    IMG_SIZE = (400, 300) # Size for each individual plot
-    PADDING = 20
-    TITLE_HEIGHT = 70      # Space above each plot for the title
-    GRID_COLS = 3
-
-    sampler = JaxEventuallyTaskSampler(
-        propositions=PROPS,
-        min_levels=2,
-        max_levels=MAX_LEVELS,
-        min_conjunctions=2,
-        max_conjunctions=MAX_CONJUNCTIONS
-    )
-    
-    key = jax.random.PRNGKey(py_random.randint(1,300))
-    
-    # --- 2. Sample Initial Task ---
-    print("Sampling initial task...")
-    key, sample_key = jax.random.split(key)
-    state, c, l = sampler.sample(sample_key)
-    print("avg",int(c),float(l))
-
-    images = []
-    titles = []
-    sampled_letter = "None" # For first title
-
-    # --- 3. Simulation Loop ---
-    print(f"Starting simulation loop for max {NUM_STEPS} steps...")
-    for t in range(NUM_STEPS):
-        print(f"--- Step {t} ---")
-        
-        # 3a. Decode formula for title
-        formula_str = ltl_tuple_to_string(sampler.decode_formula(state))
-        title = f"Step {t} (Sampled: {sampled_letter})\n{formula_str}"
-        titles.append(title)
-        print(f"Formula: {formula_str}")
-
-        ast_data = sampler.build_ast(state)
-        try:
-            # Use new function
-            img = sampler.visualize_ast(ast_data, img_size=IMG_SIZE)
-            
-            if img is None:
-                 raise Exception("visualize_ast returned None (plotting failed)")
-
-            images.append(img)
-        except Exception as e:
-            print(f"Final state rendering failed: {e}")
-            img = Image.new('RGB', IMG_SIZE, 'white') # Placeholder
-            draw = ImageDraw.Draw(img)
-            draw.text((10, 10), f"Plotting failed\n{e}", fill='red')
-            images.append(img)
-        
-        # *** START MODIFICATION ***
-        # 3d. Progress the state randomly (ONE letter at a time)
-        key, step_key, prop_key = jax.random.split(key, 3)
-        
-        # Sample a single proposition index to set to True
-        # sampler.prop_indices already has the offset (e.g., 8, 9, 10...)
-        print(np.arange(3))
-        sampled_prop_index = jax.random.choice(
-            prop_key,
-            jnp.arange(len(PROPS)),
-            shape=(1,) # Sample one index
-        )[0] # Get the scalar index
-        # Create the full boolean array (all False)
-        current_props_np = np.zeros(len(PROPS), dtype=bool)
-        # Set only the sampled proposition to True
-        current_props_np[sampled_prop_index] = True 
-        current_props = jnp.array(current_props_np)
-        print(sampled_prop_index)
-        # Get the name of the letter for logging and the next title
-        sampled_letter = sampler.INV_LTL_BASE_VOCAB[int(sampled_prop_index)+sampler.PROPS_OFFSET]
-        print(f"Sampling letter: {sampled_letter}")
-        # *** END MODIFICATION ***
-
-        # Run the progress step
-        state, is_conj_true, is_conj_false = sampler.progress(state, current_props)
-        print(is_conj_true,is_conj_false)
-        
-        # 3e. Check for terminal state
-        if is_conj_true:
-            print("Conjunction resolved to TRUE. Stopping.")
-            break
-        if is_conj_false:
-            print("Conjunction resolved to FALSE. Stopping.")
-            break
-    
-    # --- 4. Handle Final State (if loop broke) ---
-    if (t < NUM_STEPS - 1): # Loop broke early
-        print(f"--- Final State (Step {t+1}) ---")
-        formula_str = ltl_tuple_to_string(sampler.decode_formula(state))
-        title = f"Step {t+1} (Final State)\n{formula_str}"
-        titles.append(title)
-        print(f"Formula: {formula_str}")
-        
-        ast_data = sampler.build_ast(state)
-        try:
-            # Use new function
-            img = sampler.visualize_ast(ast_data, img_size=IMG_SIZE)
-            
-            if img is None:
-                 raise Exception("visualize_ast returned None (plotting failed)")
-
-            images.append(img)
-        except Exception as e:
-            print(f"Final state rendering failed: {e}")
-            img = Image.new('RGB', IMG_SIZE, 'white') # Placeholder
-            draw = ImageDraw.Draw(img)
-            draw.text((10, 10), f"Plotting failed\n{e}", fill='red')
-            images.append(img)
-
-    # --- 5. Create Image Grid ---
-    if not images:
-        print("No images were generated.")
-        return
-
-    print("Creating image grid...")
-    num_images = len(images)
-    grid_rows = (num_images + GRID_COLS - 1) // GRID_COLS
-    
-    grid_width = (IMG_SIZE[0] * GRID_COLS) + (PADDING * (GRID_COLS + 1))
-    grid_height = ((IMG_SIZE[1] + TITLE_HEIGHT) * grid_rows) + (PADDING * (grid_rows + 1))
-    
-    grid_image = Image.new('RGB', (grid_width, grid_height), 'white')
-    draw = ImageDraw.Draw(grid_image)
-    
-    try:
-        # Try to load a nicer font
-        font = ImageFont.truetype("arial.ttf", 14)
-    except IOError:
-        print("Arial font not found, using default.")
-        font = ImageFont.load_default()
-
-    for i, (img, title) in enumerate(zip(images, titles)):
-        row = i // GRID_COLS
-        col = i % GRID_COLS
-        
-        # Calculate top-left corner for this cell
-        x_offset = PADDING + col * (IMG_SIZE[0] + PADDING)
-        y_offset = PADDING + row * (IMG_SIZE[1] + TITLE_HEIGHT + PADDING)
-        
-        # Draw Title
-        draw.text((x_offset + 5, y_offset + 5), title, fill='black', font=font)
-        
-        # Paste Image
-        grid_image.paste(img, (x_offset, y_offset + TITLE_HEIGHT))
-
-    # --- 6. Save Final Image ---
-    output_filename = "ast_progression_grid_single_letter.png"
-    grid_image.save(output_filename)
-    print(f"\nSuccess! Saved AST progression grid to {output_filename}")
-
-
-if __name__ == "__main__":
-    main()

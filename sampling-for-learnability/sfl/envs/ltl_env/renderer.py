@@ -110,7 +110,7 @@ class LTLEnvRenderer:
         
         # Extract key parameters from the env config
         self.grid_size = self.env.grid_size
-        self.num_unique_letters = len(set(self.env.letters_str))
+        self.num_unique_letters = len(set(self.env.letters))
         
         # Create the atlas and store it as a jax array
         self._atlas = jnp.array(
@@ -124,16 +124,15 @@ class LTLEnvRenderer:
     def render_level(self, level: Level, env_params: EnvParams) -> chex.Array:
         """Renders a static Level representation."""
         # A Level contains the static map and agent start position
-        return (self._render_grid(level.letter_map, level.agent_pos),level.ltl_formula,level.ltl_root_idx,level.ltl_num_nodes)
+        return (self._render_grid(level.letter_map, level.agent_pos),level.ltl_formula)
 
     @partial(jax.jit, static_argnums=(0,))
     def render_state(self, env_state: EnvState, env_params: EnvParams) -> chex.Array:
         """Renders a full dynamic EnvState."""
         # The EnvState contains the inner LetterEnv state, which has the map and agent pos
         return (self._render_grid(
-            env_state.env_state.map, 
-            env_state.env_state.agent
-        ),env_state.ltl_goal,env_state.root_idx,env_state.num_nodes)
+            env_state.env_state.map, env_state.env_state.agent)
+        ,env_state.ltl_goal)
 
     @partial(jax.jit, static_argnums=(0,))
     def _render_grid(self, letter_map: chex.Array, agent_pos: chex.Array) -> chex.Array:
@@ -170,3 +169,6 @@ class LTLEnvRenderer:
         img = img.transpose(0, 2, 1, 3, 4).reshape(height_px, width_px, 3)
         
         return img
+
+
+

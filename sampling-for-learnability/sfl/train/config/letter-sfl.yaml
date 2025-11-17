@@ -11,12 +11,12 @@ defaults:
 "SAVE_PATH": "checkpoints/new_letter"
 
 learning:
-  "NUM_ENVS_FROM_SAMPLED": 32
-  "NUM_ENVS_TO_GENERATE": 32
+  "NUM_ENVS_FROM_SAMPLED": 64
+  "NUM_ENVS_TO_GENERATE": 64
 
 # SAMPLE LEARNABILITY 
-"BATCH_SIZE": 4
-"NUM_BATCHES": 20
-"ROLLOUT_STEPS": 2
-"NUM_TO_SAVE": 20
+"BATCH_SIZE": 50
+"NUM_BATCHES": 5
+"ROLLOUT_STEPS": 200
+"NUM_TO_SAVE": 100
 #"EVAL_SAMPLED_SET_PATH": "jax_multirobsim/deploy/data/sampled_test_set_100e_4a.pkl"

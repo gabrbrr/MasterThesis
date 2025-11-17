@@ -25,10 +25,13 @@ from typing import Callable, Any
 from jaxued.environments.underspecified_env import EnvParams, EnvState, Observation, UnderspecifiedEnv
 from sfl.envs.ltl_env.letter_env_wrap import Level, make_level_generator, LTLEnv, make_level_mutator_minimax
 from sfl.envs.ltl_env.renderer import LTLEnvRenderer
+from sfl.envs.ltl_env.letter_env import LetterEnv
+from sfl.envs.ltl_env.until_sampler import JaxUntilTaskSampler
+from sfl.envs.ltl_env.eventually_sampler import JaxEventuallyTaskSampler
 from jaxued.level_sampler import LevelSampler
 from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
 from jaxued.wrappers import AutoReplayWrapper
-
+from functools import partial
 
 from sfl.util.jaxued.jaxued_utils import l1_value_loss
 from sfl.train.train_utils import save_params
@@ -523,7 +526,7 @@ class ActorCritic(nn.Module):
             "edge_types": obs.edge_types,
             "n_node": obs.n_node,
         }
-        print(graph_dict["nodes"].shape,graph_dict["senders"].shape,graph_dict["receivers"].shape,graph_dict["edge_types"].shape,graph_dict["n_node"].shape )
+        # print(graph_dict["nodes"].shape,graph_dict["senders"].shape,graph_dict["receivers"].shape,graph_dict["edge_types"].shape,graph_dict["n_node"].shape )
         # Process text features with GNN
         embedding_gnn = self.gnn(graph_dict)
         # --- End Modification ---
@@ -560,17 +563,17 @@ def setup_checkpointing(config: dict, train_state: TrainState, env: Underspecifi
     Returns:
         ocp.CheckpointManager: 
     """
-    overall_save_dir = os.path.join(os.getcwd(), "checkpoints", f"{config["run_name"]}", str(config['seed']))
+    overall_save_dir = os.path.join(os.getcwd(), "checkpoints", f"{config['run_name']}", str(config['SEED']))
     os.makedirs(overall_save_dir, exist_ok=True)
     
     # save the config
     with open(os.path.join(overall_save_dir, 'config.json'), 'w+') as f:
-        f.write(json.dumps(config.as_dict(), indent=True))
+        f.write(json.dumps(config, indent=2))
     
     checkpoint_manager = ocp.CheckpointManager(
         os.path.join(overall_save_dir, 'models'),
         options=ocp.CheckpointManagerOptions(
-            save_interval_steps=config['checkpoint_save_interval'],
+            save_interval_steps=config['CHECKPOINT_SAVE_INTERVAL'],
             max_to_keep=config['max_number_of_checkpoints'],
         )
     )
@@ -652,7 +655,47 @@ def main(config):
         config=config,
         mode=config["WANDB_MODE"],
     )
+    config["run_name"] = run.name
  
+    
+    
+    props=list(config["env"]["letters"])
+    print(props)
+    if sampler_args["sampler"] == "avoidance":
+        ltl_sampler = JaxUntilTaskSampler(sorted(props),**sampler_args["types"])
+    elif sampler_args["sampler"] == "partially_ordered":
+        ltl_sampler = JaxEventuallyTaskSampler(sorted(props),**sampler_args["types"])
+    
+    @partial(jax.vmap, in_axes=(1, 1, None, None)) # vmap over batch dim (axis 1)
+    def _calc_ep_return_by_agent(dones, returns, gamma, num_steps):
+        """Calculates episodic stats for a single environment's trajectory."""
+        idxs = jnp.arange(num_steps)
+        
+        @partial(jax.vmap, in_axes=(0, 0))
+        def __ep_returns(start_idx, end_idx): 
+            mask = (idxs > start_idx) & (idxs <= end_idx) & (end_idx != num_steps)
+            r = jnp.sum(returns * mask) # `returns` is already sliced by the outer vmap
+            l = end_idx - start_idx
+            
+            ep_step_indices = jnp.clip(idxs - (start_idx + 1), a_min=0)
+            discounts = gamma ** ep_step_indices
+            discounted_r = jnp.sum(returns * discounts * mask)
+            return r, l, discounted_r
+        
+        # Find indices where episodes end
+        done_idxs = jnp.argwhere(dones, size=num_steps//4, fill_value=num_steps).squeeze() 
+        mask_done = jnp.where(done_idxs == num_steps, 0, 1) # Mask for valid episodes
+        
+        starts = jnp.concatenate([jnp.array([-1]), done_idxs[:-1]])
+        ends = done_idxs
+        
+        r, l, discounted_r = __ep_returns(starts, ends)
+        
+        # Return the mean for this single environment
+        return {"episodic_return_per_agent": r.mean(where=mask_done),
+                "episodic_length_per_agent": l.mean(where=mask_done),
+                "episodic_discounted_return_per_agent": discounted_r.mean(where=mask_done)}
+    
     def log_eval(stats, train_state_info):
         print(f"Logging update: {stats['update_count']}")
         
@@ -668,7 +711,8 @@ def main(config):
             
         if "mean_avg_levels" in stats:
             log_dict["level_stats/mean_avg_levels"] = stats["mean_avg_levels"].mean()
-            
+
+
         # # evaluation performance
         # solve_rates = stats['eval_solve_rates']
         # returns     = stats["eval_returns"]
@@ -682,34 +726,34 @@ def main(config):
         log_dict.update(train_state_info["log"])
 
         # images
-        img, enc_str, r_id, n_tokens = stats["highest_scoring_level"]
+        img, enc_str = stats["highest_scoring_level"]
         # Decode the caption (convert JAX/device arrays to NumPy for the external function)
-        caption_high_score = decode_array_to_string(np.array(enc_str), np.array(r_id), np.array(n_tokens))
+        caption_high_score = ltl_sampler.decode_formula(enc_str)
         log_dict.update({"images/highest_scoring_level": wandb.Image(np.array(img), caption=caption_high_score)})
 
         # Repeat for the other single image
-        img, enc_str, r_id, n_tokens = stats["highest_weighted_level"]
-        caption_high_weight = decode_array_to_string(np.array(enc_str), np.array(r_id), np.array(n_tokens))
+        img, enc_str = stats["highest_weighted_level"]
+        caption_high_weight = ltl_sampler.decode_formula(enc_str)
         log_dict.update({"images/highest_weighted_level": wandb.Image(np.array(img), caption=caption_high_weight)})
         
         for s in ['dr', 'replay', 'mutation']:
             if train_state_info['info'][f'num_{s}_updates'] > 0:
+                print(s,"WRGJBJWHGFUAHGUOòebflwGWeghihgiwh")
                 
                 # stats[f"{s}_levels"] is now a batched tuple (a PyTree):
-                # (images_batch, enc_strs_batch, r_ids_batch, n_tokens_batch)
-                images_batch, enc_strs_batch, r_ids_batch, n_tokens_batch = stats[f"{s}_levels"]
+                images_batch, enc_strs_batch = stats[f"{s}_levels"]
                 
                 wandb_images_with_captions = []
                 # Iterate over the batch
                 for i in range(len(images_batch)):
-                    # Get data for this single image
                     img = images_batch[i]
-                    enc_str = enc_strs_batch[i]
-                    r_id = r_ids_batch[i]
-                    n_tokens = n_tokens_batch[i]
-                    
-                    # Decode the caption (convert JAX/device arrays to NumPy)
-                    caption = decode_array_to_string(np.array(enc_str), np.array(r_id), np.array(n_tokens))
+                
+                    # Use jax.tree_map to "un-batch" the PyTree
+                    enc_str_pytree_i = jax.tree_map(lambda x: x[i], enc_strs_batch)
+                
+                    # Now enc_str_pytree_i is a single ConjunctionState
+                    # and this call is valid:
+                    caption = ltl_sampler.decode_formula(enc_str_pytree_i)
                     
                     # Create the wandb.Image with its caption
                     wandb_images_with_captions.append(wandb.Image(np.array(img), caption=caption))
@@ -722,16 +766,16 @@ def main(config):
         #     log_dict.update({f"animations/{level_name}": wandb.Video(frames, fps=4)})
         
         wandb.log(log_dict)
-    
-    # Setup the environment
 
-    env = LTLEnv(**config["env"])
+
+    base_env=LetterEnv(**config["env"])
+    env = LTLEnv(base_env, ltl_sampler)
     eval_env = env
     env_params=env.default_params
-    sample_random_level = make_level_generator(**sampler_args, **config["env"] )
-    env_renderer = LTLEnvRenderer(env, tile_size=8)
+    sample_random_level = make_level_generator(base_env, ltl_sampler)
+    env_renderer = LTLEnvRenderer(env, tile_size=1)
     env = AutoReplayWrapper(env)
-    mutate_level = make_level_mutator_minimax(2)
+    mutate_level = make_level_mutator_minimax(ltl_sampler, 2)
 
     # And the level sampler    
     level_sampler = LevelSampler(
@@ -830,11 +874,15 @@ def main(config):
                 config["VF_COEF"],
                 update_grad=config["EXPLORATORY_GRAD_UPDATES"],
             )
+            ep_stats = _calc_ep_return_by_agent(dones, rewards, config["GAMMA"], config["NUM_STEPS"])
+            # ep_stats is a dict of arrays (size B), so mean them for this step
+            ep_stats = jax.tree_map(lambda x: x.mean(), ep_stats)
             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
                 "mean_num_conjs": new_levels.num_conjuncts.mean(),
                 "mean_avg_levels": new_levels.avg_levels.mean(),
+                **ep_stats,
             }
             
             train_state = train_state.replace(
@@ -887,11 +935,15 @@ def main(config):
                 config["VF_COEF"],
                 update_grad=True,
             )
+            ep_stats = _calc_ep_return_by_agent(dones, rewards, config["GAMMA"], config["NUM_STEPS"])
+            # ep_stats is a dict of arrays (size B), so mean them for this step
+            ep_stats = jax.tree_map(lambda x: x.mean(), ep_stats)
                             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
                 "mean_num_conjs": levels.num_conjuncts.mean(),
                 "mean_avg_levels": levels.avg_levels.mean(),
+                **ep_stats,
             }
             
             train_state = train_state.replace(
@@ -948,11 +1000,15 @@ def main(config):
                 config["VF_COEF"],
                 update_grad=config["EXPLORATORY_GRAD_UPDATES"],
             )
+            ep_stats = _calc_ep_return_by_agent(dones, rewards, config["GAMMA"], config["NUM_STEPS"])
+            # ep_stats is a dict of arrays (size B), so mean them for this step
+            ep_stats = jax.tree_map(lambda x: x.mean(), ep_stats)
             
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
                 "mean_num_conjs": child_levels.num_conjuncts.mean(),
                 "mean_avg_levels": child_levels.avg_levels.mean(),
+                **ep_stats,
             }
             
             train_state = train_state.replace(
@@ -1013,37 +1069,21 @@ def main(config):
             It returns the updated train state, and a dictionary of metrics.
         """
         # Train
-        (rng, train_state), metrics = jax.lax.scan(train_step, runner_state, None, config["EVAL_FREQ"])
-
-        # # Eval
-        # rng, rng_eval = jax.random.split(rng)
-        # states, cum_rewards, episode_lengths = jax.vmap(eval, (0, None))(jax.random.split(rng_eval, config["EVAL_NUM_ATTEMPTS"]), train_state)
+        (rng, train_state), train_metrics_stack = jax.lax.scan(train_step, runner_state, None, config["EVAL_FREQ"])   
+        eval_metrics = {}
+        eval_metrics["update_count"] = train_state.num_dr_updates + train_state.num_replay_updates + train_state.num_mutation_updates
         
-        # # Collect Metrics
-        # eval_solve_rates = jnp.where(cum_rewards > 0, 1., 0.).mean(axis=0) # (num_eval_levels,)
-        # eval_returns = cum_rewards.mean(axis=0) # (num_eval_levels,)
-        
-        # # just grab the first run
-        # states, episode_lengths = jax.tree_map(lambda x: x[0], (states, episode_lengths)) # (num_steps, num_eval_levels, ...), (num_eval_levels,)
-        # images, _ , _, _ = jax.vmap(jax.vmap(env_renderer.render_state, (0, None)), (0, None))(states, env_params) # (num_steps, num_eval_levels, ...)
-        # frames= images.transpose(0, 1, 4, 2, 3) # WandB expects color channel before image dimensions when dealing with animations for some reason
-        
-        metrics["update_count"] = train_state.num_dr_updates + train_state.num_replay_updates + train_state.num_mutation_updates
-        # metrics["eval_returns"] = eval_returns
-        # metrics["eval_solve_rates"] = eval_solve_rates
-        # metrics["eval_ep_lengths"]  = episode_lengths
-        # metrics["eval_animation"] = (frames, episode_lengths)
-        metrics["dr_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.dr_last_level_batch, env_params)
-        metrics["replay_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.replay_last_level_batch, env_params)
-        metrics["mutation_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.mutation_last_level_batch, env_params)
+        eval_metrics["dr_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.dr_last_level_batch, env_params)
+        eval_metrics["replay_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.replay_last_level_batch, env_params)
+        eval_metrics["mutation_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.mutation_last_level_batch, env_params)
         
         highest_scoring_level = level_sampler.get_levels(train_state.sampler, train_state.sampler["scores"].argmax())
         highest_weighted_level = level_sampler.get_levels(train_state.sampler, level_sampler.level_weights(train_state.sampler).argmax())
         
-        metrics["highest_scoring_level"] = env_renderer.render_level(highest_scoring_level, env_params)
-        metrics["highest_weighted_level"] = env_renderer.render_level(highest_weighted_level, env_params)
+        eval_metrics["highest_scoring_level"] = env_renderer.render_level(highest_scoring_level, env_params)
+        eval_metrics["highest_weighted_level"] = env_renderer.render_level(highest_weighted_level, env_params)
         
-        return (rng, train_state), metrics
+        return (rng, train_state), train_metrics_stack, eval_metrics
     
     def eval_checkpoint(og_config):
         """
@@ -1082,17 +1122,45 @@ def main(config):
         checkpoint_manager = setup_checkpointing(config, train_state, env, env_params)
     for eval_step in range(config["NUM_UPDATES"] // config["EVAL_FREQ"]):
         start_time = time.time()
-        runner_state, metrics = train_and_eval_step(runner_state, None)
+        runner_state, train_metrics_stack, eval_metrics = train_and_eval_step(runner_state, None)
         curr_time = time.time()
-        metrics['time_delta'] = curr_time - start_time
-        log_eval(metrics, train_state_to_log_dict(runner_state[1], level_sampler))
+        current_update_count = eval_metrics["update_count"] 
+        # Calculate the first update step number for this cycle
+        start_update_count = current_update_count - config["EVAL_FREQ"]
+        for i in range(config["EVAL_FREQ"]):
+            # Get the metrics for this single train_step
+            step_metric = jax.tree_map(lambda x: x[i], train_metrics_stack)
+            
+            # Calculate the correct global step number
+            current_step = start_update_count + i
+
+            # Build the dictionary for this single step
+            log_dict_step = {
+                "train/total_loss": step_metric["losses"][0],
+                "train/value_loss": step_metric["losses"][1][0],
+                "train/actor_loss": step_metric["losses"][1][1],
+                "train/entropy": step_metric["losses"][1][2],
+                "train/episodic_return_per_agent": step_metric["episodic_return_per_agent"],
+                "train/episodic_length_per_agent": step_metric["episodic_length_per_agent"],
+                "train/episodic_discounted_return_per_agent": step_metric["episodic_discounted_return_per_agent"],
+                "level_stats/mean_num_conjs": step_metric["mean_num_conjs"],
+                "level_stats/mean_avg_levels": step_metric["mean_avg_levels"],
+                "num_updates": current_step, # Log the individual update step
+                "num_env_steps": current_step * config["NUM_ENVS"] * config["NUM_STEPS"]
+            }
+            
+            # Log the metrics for this specific step
+            wandb.log(log_dict_step, step=current_step)
+            
+        eval_metrics['time_delta'] = curr_time - start_time
+        log_eval(eval_metrics, train_state_to_log_dict(runner_state[1], level_sampler))
         if config["CHECKPOINT_SAVE_INTERVAL"] > 0:
             checkpoint_manager.save(eval_step, args=ocp.args.StandardSave(runner_state[1]))
             checkpoint_manager.wait_until_finished()
 
     if config["SAVE_PATH"] is not None:
+        os.makedirs(config["SAVE_PATH"], exist_ok=True)
         params = runner_state[1].params
-        
         save_dir = os.path.join(config["SAVE_PATH"], wandb.run.name)
         os.makedirs(save_dir, exist_ok=True)
         save_params(params, f'{save_dir}/model.safetensors')

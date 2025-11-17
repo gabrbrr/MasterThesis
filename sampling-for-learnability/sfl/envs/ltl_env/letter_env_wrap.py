@@ -6,14 +6,12 @@ from flax import struct  # Import for struct.dataclass
 import chex
 from functools import partial
 from collections import OrderedDict
-from typing import Tuple
+from typing import Callable, Any, NamedTuple, List, Tuple
 
 from jaxued.environments import UnderspecifiedEnv 
-from sfl.envs.ltl_env.ast import JaxASTBuilder
-from sfl.envs.ltl_env.sampler import JaxUntilTaskSampler, JaxEventuallySampler
-from sfl.envs.ltl_env.utils import *
-import sfl.envs.ltl_env.progress as progress
-from sfl.envs.ltl_env.letter_env import LetterEnv, LetterEnvState, encode_letters
+from sfl.envs.ltl_env.eventually_sampler import  JaxEventuallyTaskSampler
+from sfl.envs.ltl_env.until_sampler import JaxUntilTaskSampler, ConjunctionState
+from sfl.envs.ltl_env.letter_env import LetterEnv, LetterEnvState
 from typing import Callable
 from gymnax.environments import spaces
 
@@ -34,9 +32,7 @@ class Level:
     """
     letter_map: chex.Array           # The letter grid [grid_size, grid_size, num_unique_letters]
     agent_pos: chex.Array     # Initial agent position (e.g., jnp.array([0, 0]))
-    ltl_formula: chex.Array   
-    ltl_num_nodes: int
-    ltl_root_idx: int
+    ltl_formula: Any 
     num_conjuncts: int
     avg_levels: int
 
@@ -46,39 +42,24 @@ class EnvParams:
 
 class EnvState(PyTreeNode):
     env_state: LetterEnvState   # Underlying LetterEnv state
-    ltl_goal: jnp.ndarray       # Current LTL formula
-    ltl_original: jnp.ndarray   # Original LTL formula
+    ltl_goal: Any    # Current LTL formula
+    ltl_original: Any  # Original LTL formula
     key: jnp.ndarray            # PRNG key
-    num_nodes: jnp.ndarray
-    root_idx: jnp.ndarray
     terminal: bool              
 
 class LTLEnv(UnderspecifiedEnv): 
     def __init__(self, 
-                 grid_size=7, 
-                 letters="aabbccddeeffgghhiijjkkll", 
-                 use_fixed_map=False, 
-                 use_agent_centric_view=True, 
-                 intrinsic: float = 0.0,
-                 max_steps_in_episode: int = 75):
+                env,
+                sampler):
         super().__init__()
         
-        self.grid_size = grid_size
-        self.letters_str = letters 
-        self.use_fixed_map = use_fixed_map
-        self.use_agent_centric_view = use_agent_centric_view
-        self.intrinsic = intrinsic
-        
-        # Pass the static config down to the base LetterEnv
-        self.env = LetterEnv(
-            grid_size=self.grid_size,
-            letters=self.letters_str,
-            use_fixed_map=self.use_fixed_map,
-            use_agent_centric_view=self.use_agent_centric_view,
-            max_steps_in_episode=max_steps_in_episode 
-        )
-        self.propositions = self.env.get_propositions()
-        self.ast_builder = JaxASTBuilder(VOCAB_SIZE, MAX_NODES)
+        self.env = env 
+        self.grid_size = env.grid_size
+        self.use_fixed_map = env.use_fixed_map
+        self.use_agent_centric_view = env.use_agent_centric_view
+        self.intrinsic = 0.0 # what to return if neither satisfied or falsified
+        self.sampler=sampler
+        self.letters=env.letters
         
         
     @property
@@ -105,8 +86,6 @@ class LTLEnv(UnderspecifiedEnv):
             ltl_goal=level.ltl_formula,
             ltl_original=level.ltl_formula,
             key=key,
-            num_nodes=level.ltl_num_nodes,
-            root_idx=level.ltl_root_idx,
             terminal=False # Always start non-terminal
         )
         return ltl_state
@@ -141,12 +120,8 @@ class LTLEnv(UnderspecifiedEnv):
         )
 
         truth_assignment = jax.lax.stop_gradient(self.get_events(new_env_state))
-        ltl_goal, root_index, num_nodes = progress.progress_and_clean_jax(
-            state.ltl_goal, truth_assignment, 0, state.num_nodes
-        )
+        ltl_goal, is_true, is_false= self.sampler.progress(state.ltl_goal, truth_assignment)
 
-        is_true = (ltl_goal[0][0] == LTL_BASE_VOCAB['True'])
-        is_false = (ltl_goal[0][0] == LTL_BASE_VOCAB['False'])
         ltl_terminal = jnp.logical_or(is_true, is_false) 
 
         ltl_reward = jax.lax.cond(
@@ -164,8 +139,6 @@ class LTLEnv(UnderspecifiedEnv):
             ltl_goal=ltl_goal,
             ltl_original=state.ltl_original,
             key=key,
-            num_nodes=num_nodes,
-            root_idx=root_index,
             terminal=ltl_terminal 
         )
         
@@ -183,7 +156,7 @@ class LTLEnv(UnderspecifiedEnv):
         base_obs = self.env._get_observation(state.env_state)
         
         # Get LTL graph observation
-        graph = self.ast_builder(state.ltl_goal, state.num_nodes)
+        graph = self.sampler.build_ast(state.ltl_goal)
         
         # Combine them
         ltl_obs = Observation(image=base_obs, senders=graph['senders'], receivers=graph['receivers'], n_node=graph['n_node'], nodes=graph['nodes'], edge_types=graph['edge_types'])
@@ -210,20 +183,11 @@ class LTLEnv(UnderspecifiedEnv):
         return self.env.action_space()
    
     def get_env_metrics(self, state: EnvState) -> dict:
-        return dict(num_nodes_left=state.num_nodes)
+        assert False, "Not implemented"
    
 def make_level_generator(
-    sampler,
-    min_levels, 
-    max_levels, 
-    min_conjunctions, 
-    max_conjunctions,
-    # Accept static config as keyword args
-    grid_size=7,
-    letters="aabbccddeeffgghhiijjkkll",
-    use_fixed_map=False,
-    use_agent_centric_view=True,
-    max_steps_in_episode=100
+    env,
+    sampler
     ):
     """
     Creates a level generator function for the LTLEnv.
@@ -231,20 +195,10 @@ def make_level_generator(
 
     # 1. Instantiate the map sampler (the base LetterEnv)
     #    using the provided static config.
-    map_sampler_env = LetterEnv(
-        grid_size=grid_size,
-        letters=letters,
-        use_fixed_map=use_fixed_map,
-        use_agent_centric_view=use_agent_centric_view,
-        max_steps_in_episode=max_steps_in_episode
-    )
+    map_sampler_env = env
+    ltl_sampler=sampler
 
-    propositions = map_sampler_env.get_propositions()
-    if sampler == "avoidance":
-        ltl_sampler = JaxUntilTaskSampler(propositions,min_levels=min_levels, max_levels=max_levels, min_conjunctions=min_conjunctions, max_conjunctions=max_conjunctions)
-    elif sampler == "partially_ordered":
-        ltl_sampler = JaxEventuallySampler(propositions,min_levels=min_levels, max_levels=max_levels, min_conjunctions=min_conjunctions, max_conjunctions=max_conjunctions)
-
+    
     @jax.jit
     def sample(key: chex.PRNGKey) -> Level:
         """
@@ -258,7 +212,7 @@ def make_level_generator(
         sampled_map = letter_env_state.map
 
         # b. Sample an LTL formula
-        ltl_formula, num_nodes, root_idx, num_conjunctions, avg_levels = ltl_sampler.sample(key_ltl)
+        ltl_formula, num_conjunctions, avg_levels = ltl_sampler.sample(key_ltl)
 
         agent_pos = jnp.array([0, 0], dtype=jnp.int32)
 
@@ -266,9 +220,7 @@ def make_level_generator(
             letter_map=sampled_map,
             agent_pos=agent_pos,
             ltl_formula=ltl_formula,
-            ltl_num_nodes=num_nodes,
-            ltl_root_idx=root_idx,
-            num_conjuncts=num_conjunctions,
+            num_conjuncts=num_conjunctions,\
             avg_levels=avg_levels
             
         )
@@ -277,81 +229,243 @@ def make_level_generator(
     return sample
 
 
-def make_level_mutator_minimax(max_num_edits: int) -> Callable[[chex.PRNGKey, Level, int], Level]:
+# def make_level_mutator_minimax(max_num_edits: int) -> Callable[[chex.PRNGKey, Level, int], Level]:
+#     """
+#     Creates a mutator function that permutes propositions and letter maps.
+
+#     The returned mutator applies a cyclical shift to all propositions
+#     (e.g., 'a' -> 'b', ..., 'l' -> 'a') and the corresponding letter
+#     representations in the grid.
+
+#     The number of shifts (edits) is sampled randomly from [1, max_num_edits]
+#     using the provided PRNG key.
+#     """
+    
+#     # Pre-calculate constants for the inner function closure
+#     _PROP_OFFSET = self.sampler.PROP_OFFSET
+#     _NUM_PROPS = len(self.sampler.propositions)
+    
+#     @jax.jit
+#     def _mutator(key: chex.PRNGKey, level: Level, solve_steps: int) -> Level:
+#         """
+#         Applies a random number of +1 proposition/letter permutations.
+        
+#         Args:
+#             key: JAX PRNG key to sample the number of edits.
+#             level: The level to mutate.
+#             solve_steps: Ignored. Included for a consistent UED mutator API.
+#         """
+        
+#         # 1. Sample the number of shifts (edits) to apply.
+#         # We sample n from [1, max_num_edits].
+#         shift_amount = jax.random.randint(
+#             key, 
+#             shape=(), 
+#             minval=1, 
+#             maxval=max_num_edits + 1
+#         )
+
+#         # --- 2. Mutate LTL Formula ---
+        
+#         # Get the token IDs (first column of the formula array)
+#         tokens = level.ltl_formula[:, 0]
+        
+#         # Create a mask to identify which tokens are propositions
+#         is_prop = (tokens >= _PROP_OFFSET) & (tokens < _PROP_OFFSET + _NUM_PROPS)
+        
+#         # Convert proposition token IDs to zero-based indices (0 for 'a', 1 for 'b', ...)
+#         # This is the 'neighbour' value from the prompt
+#         prop_indices = tokens - _PROP_OFFSET
+        
+#         # Apply the circular shift: (neighbour + n) % num_props
+#         new_prop_indices = (prop_indices + shift_amount) % _NUM_PROPS
+        
+#         # Convert back to token IDs
+#         new_tokens = new_prop_indices + _PROP_OFFSET
+        
+#         # Only apply the mutation to tokens that were propositions
+#         mutated_tokens = jnp.where(is_prop, new_tokens, tokens)
+        
+#         # Update the formula array. .at[...].set() is the JAX way to update.
+#         mutated_formula = level.ltl_formula.at[:, 0].set(mutated_tokens)
+
+#         # --- 3. Mutate Letter Map ---
+        
+#         # The letter_map has shape [grid, grid, num_unique_letters].
+#         # num_unique_letters should be equal to _NUM_PROPS.
+#         # We apply the same circular shift to the last axis.
+#         mutated_letter_map = jnp.roll(
+#             level.letter_map, 
+#             shift=shift_amount, 
+#             axis=-1 # The last axis is the one-hot letter dimension
+#         )
+        
+#         # --- 4. Return new Level ---
+#         return level.replace(
+#             letter_map=mutated_letter_map,
+#             ltl_formula=mutated_formula
+#         )
+
+#     return _mutator
+
+def make_level_mutator_minimax(
+    sampler: JaxUntilTaskSampler, 
+    max_num_edits: int
+) -> Callable[[chex.PRNGKey, Level, int], Level]:
     """
-    Creates a mutator function that permutes propositions and letter maps.
+    Creates a JIT-compiled level mutator function for minimax-style UED.
 
-    The returned mutator applies a cyclical shift to all propositions
-    (e.g., 'a' -> 'b', ..., 'l' -> 'a') and the corresponding letter
-    representations in the grid.
+    The mutator makes a small number of random edits to the LTL formula's
+    ConjunctionState by swapping active propositions.
 
-    The number of shifts (edits) is sampled randomly from [1, max_num_edits]
-    using the provided PRNG key.
+    Args:
+        sampler: An instance of `JaxUntilTaskSampler`, used to access
+                 the list of available proposition indices.
+        max_num_edits: The maximum number of single-proposition
+                       swaps to perform on the level.
+
+    Returns:
+        A JIT-compiled function with the signature:
+        (key: PRNGKey, level: Level, agent_return: int) -> Level
+        The `agent_return` is ignored in this implementation.
     """
     
-    # Pre-calculate constants for the inner function closure
-    _PROP_OFFSET = PROP_OFFSET
-    _NUM_PROPS = NUM_PROPS
+    # Get shape constants from sampler
+    N = sampler.max_conjunctions
+    M = sampler.max_levels
     
     @jax.jit
-    def _mutator(key: chex.PRNGKey, level: Level, solve_steps: int) -> Level:
+    def _mutate_conjunction_state(
+        key: chex.PRNGKey, 
+        conj_state: ConjunctionState,
+        n_edits: int
+    ) -> Tuple[chex.PRNGKey, ConjunctionState]:
         """
-        Applies a random number of +1 proposition/letter permutations.
-        
-        Args:
-            key: JAX PRNG key to sample the number of edits.
-            level: The level to mutate.
-            solve_steps: Ignored. Included for a consistent UED mutator API.
+        Applies `n_edits` random mutations to a ConjunctionState.
+        Uses a fori_loop for JIT-compatibility.
         """
         
-        # 1. Sample the number of shifts (edits) to apply.
-        # We sample n from [1, max_num_edits].
-        shift_amount = jax.random.randint(
-            key, 
+        def _edit_loop_body(i: int, loop_state: Tuple[chex.PRNGKey, ConjunctionState]):
+            """Body of the fori_loop, performs a single edit."""
+            key, state = loop_state
+            # Split key for all random choices in this iteration
+            key, subkey1, subkey2, subkey3, subkey4 = jax.random.split(key, 5)
+
+            # 1. Find all *active* (n, m) indices.
+            # These are indices within the actual depth and active conjuncts.
+            depth_mask = jnp.arange(M) < state.depths[:, None]  # (N, M)
+            conjunction_mask = ~state.already_true                # (N,)
+            active_mask = depth_mask & conjunction_mask[:, None]  # (N, M)
+            
+            # 2. Get all valid indices and the total count
+            num_active = jnp.sum(active_mask)
+            # Get valid indices, padded with 0s if not enough
+            valid_n, valid_m = jnp.where(active_mask, size=N * M, fill_value=0)
+
+            def _apply_mutation(key_tuple):
+                """Closure to apply one mutation, used in lax.cond."""
+                key, subkey1, subkey2, subkey3, subkey4 = key_tuple
+                
+                # 3. Sample *which* active index to mutate
+                # We use jnp.maximum(1, num_active) to avoid randint error if num_active is 0
+                rand_idx = jax.random.randint(
+                    subkey1, 
+                    shape=(), 
+                    minval=0, 
+                    maxval=jnp.maximum(1, num_active)
+                )
+                n_idx = valid_n[rand_idx]
+                m_idx = valid_m[rand_idx]
+
+                # 4. Sample *what* to mutate (avoid or progress)
+                mutate_avoid = jax.random.bernoulli(subkey2)
+
+                # 5. Sample the *new proposition*
+                new_prop_idx = jax.random.choice(subkey3, sampler.prop_indices)
+                
+                # 6. Apply the mutation
+                to_avoid = state.to_avoid
+                to_progress = state.to_progress
+
+                # Create the mutated arrays
+                new_to_avoid = to_avoid.at[n_idx, m_idx].set(new_prop_idx)
+                new_to_progress = to_progress.at[n_idx, m_idx].set(new_prop_idx)
+                
+                # Selectively apply the mutation based on `mutate_avoid`
+                mutated_to_avoid = jax.lax.cond(
+                    mutate_avoid,
+                    lambda: new_to_avoid,
+                    lambda: to_avoid
+                )
+                mutated_to_progress = jax.lax.cond(
+                    mutate_avoid,
+                    lambda: to_progress,
+                    lambda: new_to_progress
+                )
+                
+                return state._replace(
+                    to_avoid=mutated_to_avoid, 
+                    to_progress=mutated_to_progress
+                )
+
+            # 7. Only apply mutation if there's at least one active prop
+            #    Otherwise, return the state unchanged for this iteration.
+            new_state = jax.lax.cond(
+                num_active > 0,
+                # Pass keys as a tuple to the true_fun
+                lambda: _apply_mutation((key, subkey1, subkey2, subkey3, subkey4)),
+                # false_fun: just return the state
+                lambda: state 
+            )
+            
+            return (key, new_state)
+
+        # --- End of _edit_loop_body ---
+
+        # Run the mutation loop `n_edits` times
+        key, final_state = jax.lax.fori_loop(
+            0, n_edits, _edit_loop_body, (key, conj_state)
+        )
+        
+        return key, final_state
+
+    @jax.jit
+    def mutate_level(
+        key: chex.PRNGKey, 
+        level: Level, 
+        agent_return: int  # Standard UED/PAIRED arg, ignored here
+    ) -> Level:
+        """
+        The returned mutator function.
+        
+        It samples a number of edits and applies them to the level's
+        LTL formula.
+        """
+        # Split key to sample n_edits
+        key, subkey = jax.random.split(key)
+        
+        # Sample the number of edits to perform, from 1 to max_num_edits
+        n_edits = jax.random.randint(
+            subkey, 
             shape=(), 
             minval=1, 
             maxval=max_num_edits + 1
         )
-
-        # --- 2. Mutate LTL Formula ---
         
-        # Get the token IDs (first column of the formula array)
-        tokens = level.ltl_formula[:, 0]
+        # Get the LTL formula (ConjunctionState)
+        current_conj_state = level.ltl_formula
         
-        # Create a mask to identify which tokens are propositions
-        is_prop = (tokens >= _PROP_OFFSET) & (tokens < _PROP_OFFSET + _NUM_PROPS)
-        
-        # Convert proposition token IDs to zero-based indices (0 for 'a', 1 for 'b', ...)
-        # This is the 'neighbour' value from the prompt
-        prop_indices = tokens - _PROP_OFFSET
-        
-        # Apply the circular shift: (neighbour + n) % num_props
-        new_prop_indices = (prop_indices + shift_amount) % _NUM_PROPS
-        
-        # Convert back to token IDs
-        new_tokens = new_prop_indices + _PROP_OFFSET
-        
-        # Only apply the mutation to tokens that were propositions
-        mutated_tokens = jnp.where(is_prop, new_tokens, tokens)
-        
-        # Update the formula array. .at[...].set() is the JAX way to update.
-        mutated_formula = level.ltl_formula.at[:, 0].set(mutated_tokens)
-
-        # --- 3. Mutate Letter Map ---
-        
-        # The letter_map has shape [grid, grid, num_unique_letters].
-        # num_unique_letters should be equal to _NUM_PROPS.
-        # We apply the same circular shift to the last axis.
-        mutated_letter_map = jnp.roll(
-            level.letter_map, 
-            shift=shift_amount, 
-            axis=-1 # The last axis is the one-hot letter dimension
+        # Mutate it
+        key, new_conj_state = _mutate_conjunction_state(
+            key, 
+            current_conj_state, 
+            n_edits
         )
         
-        # --- 4. Return new Level ---
-        return level.replace(
-            letter_map=mutated_letter_map,
-            ltl_formula=mutated_formula
-        )
+        # Return the *new* level with the mutated formula
+        new_level = level.replace(ltl_formula=new_conj_state)
+        
+        return new_level
 
-    return _mutator
+    # Return the JIT-compiled mutator function
+    return mutate_level
