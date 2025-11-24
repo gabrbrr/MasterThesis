@@ -16,6 +16,7 @@ import optax
 import distrax
 import os
 import orbax.checkpoint as ocp
+
 import wandb
 import chex
 from enum import IntEnum
@@ -32,9 +33,9 @@ from jaxued.level_sampler import LevelSampler
 from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
 from jaxued.wrappers import AutoReplayWrapper
 from functools import partial
-
 from sfl.util.jaxued.jaxued_utils import l1_value_loss
 from sfl.train.train_utils import save_params
+from flax.core import freeze, unfreeze
 
 class UpdateState(IntEnum):
     DR = 0
@@ -50,6 +51,8 @@ class TrainState(BaseTrainState):
     dr_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
     replay_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
     mutation_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
+
+
 
 # region PPO helper functions
 def compute_gae(
@@ -333,12 +336,13 @@ class RelationalUpdate(nn.Module):
         # Compute messages: messages[e] = W_type(e) * h_sender(e)
         # einsum is efficient for this batched matrix-vector product.
         messages = jnp.einsum('eif,ei->ef', edge_kernels, sender_features) # Shape: [num_edges, out_features]
-        
-        return messages
+      #  bias = self.param('bias', nn.initializers.zeros, (self.features,))
+        return messages 
+        #+ bias
 
 def CustomRelationalGraphConvolution(
     update_node_module: nn.Module,
-    symmetric_normalization: bool = True
+    symmetric_normalization: bool = False
 ) -> Callable[[dict], dict]:
     """
     Returns a function that applies a Relational Graph Convolution layer.
@@ -804,6 +808,67 @@ def main(config):
         )
         network = ActorCritic()
         network_params = network.init(rng, obs) 
+
+        if config.get("GNN_PATH"):
+            print(f"Loading pretrained GNN from: {config['GNN_PATH']}")
+            
+            # Initialize Orbax Manager pointing to the config path
+            # We use PyTreeCheckpointHandler as per your save snippet
+            gnn_task_path= os.path.abspath(os.path.join(config["GNN_PATH"],sampler_args["sampler"]))
+            ckpt_manager = ocp.CheckpointManager(
+                gnn_task_path, 
+                item_handlers=ocp.PyTreeCheckpointHandler()
+            )
+
+            
+            # Get the latest step
+            latest_step = ckpt_manager.latest_step()
+            
+            if latest_step is not None:
+                # 2. Get Metadata FIRST
+                # This reads the tree structure (ShapeDtypeStructs) from disk without loading the heavy data.
+                # It will return a dict-based tree since AlgoState isn't available.
+                metadata = ckpt_manager.item_metadata(latest_step)
+        
+                # "Don't try to shard this. Just give me a standard numpy array."
+                def force_numpy(leaf):
+                    return ocp.RestoreArgs(restore_type=np.ndarray)
+                    
+                # Create a tree of args matching the structure of the checkpoint
+                numpy_restore_args = jax.tree_util.tree_map(force_numpy, metadata)
+        
+                # 4. Restore using the args
+                # We pass strict=False to be safe against any non-array mismatch, 
+                # though usually not strictly necessary if metadata is fresh.
+                restored_state = ckpt_manager.restore(
+                    latest_step,
+                    args=ocp.args.PyTreeRestore(
+                        restore_args=numpy_restore_args
+                    )
+                )
+        
+                # 5. Extract Params
+                # Since you don't have the classes, 'restored_state' is now a standard Python Dict.
+                # We navigate it using dictionary keys.
+                try:
+                    # Access dictionary keys instead of class attributes
+                    pretrained_gnn_params = restored_state['algo_state']['params']['gnn']
+                    
+                    # ... (Proceed with your grafting/unfreezing logic) ...
+                    params_mutable = unfreeze(network_params)
+                    params_mutable['params']['gnn'] = pretrained_gnn_params
+                    network_params = freeze(params_mutable)
+                    
+                    print(f"Successfully grafted GNN parameters from step {latest_step}")
+                    
+                except KeyError as e:
+                    print(f"WARNING: Could not find key path in checkpoint: {e}")
+                    print(f"Available top-level keys: {restored_state.keys()}")
+        
+            else:
+                print(f"WARNING: No checkpoints found in {gnn_task_path}")
+
+        
         tx = optax.chain(
             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
             optax.adam(learning_rate=linear_schedule, eps=1e-5),

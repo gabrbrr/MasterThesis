@@ -131,6 +131,65 @@ def main(config):
     ) 
     init_x = obs
     network_params = network.init(_rng, init_x)
+
+    if config.get("GNN_PATH"):
+            print(f"Loading pretrained GNN from: {config['GNN_PATH']}")
+            
+            # Initialize Orbax Manager pointing to the config path
+            # We use PyTreeCheckpointHandler as per your save snippet
+            gnn_task_path= os.path.abspath(os.path.join(config["GNN_PATH"],sampler_args["sampler"]))
+            ckpt_manager = ocp.CheckpointManager(
+                gnn_task_path, 
+                item_handlers=ocp.PyTreeCheckpointHandler()
+            )
+
+            
+            # Get the latest step
+            latest_step = ckpt_manager.latest_step()
+            
+            if latest_step is not None:
+                # This reads the tree structure (ShapeDtypeStructs) from disk without loading the heavy data.
+                # It will return a dict-based tree since AlgoState isn't available.
+                metadata = ckpt_manager.item_metadata(latest_step)
+        
+                # "Don't try to shard this. Just give me a standard numpy array."
+                def force_numpy(leaf):
+                    return ocp.RestoreArgs(restore_type=np.ndarray)
+                    
+                # Create a tree of args matching the structure of the checkpoint
+                numpy_restore_args = jax.tree_util.tree_map(force_numpy, metadata)
+        
+                # 4. Restore using the args
+                # We pass strict=False to be safe against any non-array mismatch, 
+                # though usually not strictly necessary if metadata is fresh.
+                restored_state = ckpt_manager.restore(
+                    latest_step,
+                    args=ocp.args.PyTreeRestore(
+                        restore_args=numpy_restore_args
+                    )
+                )
+        
+                # 5. Extract Params
+                # Since you don't have the classes, 'restored_state' is now a standard Python Dict.
+                # We navigate it using dictionary keys.
+                try:
+                    # Access dictionary keys instead of class attributes
+                    pretrained_gnn_params = restored_state['algo_state']['params']['gnn']
+                    
+                    # ... (Proceed with your grafting/unfreezing logic) ...
+                    params_mutable = unfreeze(network_params)
+                    params_mutable['params']['gnn'] = pretrained_gnn_params
+                    network_params = freeze(params_mutable)
+                    
+                    print(f"Successfully grafted GNN parameters from step {latest_step}")
+                    
+                except KeyError as e:
+                    print(f"WARNING: Could not find key path in checkpoint: {e}")
+                    print(f"Available top-level keys: {restored_state.keys()}")
+        
+            else:
+                print(f"WARNING: No checkpoints found in {gnn_task_path}")
+
     if t_config["ANNEAL_LR"]:
         tx = optax.chain(
             optax.clip_by_global_norm(t_config["MAX_GRAD_NORM"]),
