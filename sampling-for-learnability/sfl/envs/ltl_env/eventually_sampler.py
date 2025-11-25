@@ -230,268 +230,266 @@ class JaxEventuallyTaskSampler:
 
     ###########################    PROGRESS     ########################################################
 
-    @jax.jit
-    def _check_proposition_implication(p1_i, p2_i, p1_j, p2_j):
+    @partial(jax.jit, static_argnames=['self'])
+    def _check_proposition_implication(self, p1_i, p2_i, p1_j, p2_j):
         """
         Checks if (p1_i | p2_i) => (p1_j | p2_j).
-        
+
         This is true if the set of propositions {p1_i, p2_i} (ignoring 0s)
         is a subset of {p1_j, p2_j} (ignoring 0s).
         """
-        
+
         # Check if p1_i is in the j-set {p1_j, p2_j}
         # p1_i is "ok" if it's 0 (inactive) or if it's present in j.
         p1_i_in_j = (p1_i == p1_j) | (p1_i == p2_j)
         p1_i_ok = (p1_i == 0) | p1_i_in_j
-    
+
         # Check if p2_i is in the j-set {p1_j, p2_j}
         # p2_i is "ok" if it's 0 (inactive) or if it's present in j.
         p2_i_in_j = (p2_i == p1_j) | (p2_i == p2_j)
         p2_i_ok = (p2_i == 0) | p2_i_in_j
-    
+
         # Both must be satisfied for the subset relationship to hold.
         return p1_i_ok & p2_i_ok
-    
-    
-    @partial(jax.jit, static_argnames=['max_depth'])
-    def _check_conjunct_implication(conj_i, conj_j, max_depth):
+
+
+    @partial(jax.jit, static_argnames=['self'])
+    def _check_conjunct_implication(self, conj_i, conj_j):
         """
         Checks if conjunct C_i (implier) implies C_j (implied).
-        
+
         This uses a 'subset-subsequence' check.
-        
+
         Args:
             conj_i (jnp.ndarray): Shape (2, max_depth), the implier conjunct.
             conj_j (jnp.ndarray): Shape (2, max_depth), the implied conjunct.
-            max_depth (int): Static argument for loop bounds.
-            
+
         Returns:
             bool: True if C_i implies C_j.
         """
-    
+
         # We scan over the depths of C_j (the "implied" sequence).
         # The carry `i_idx_carry` is the depth we are searching *from* in C_i.
-        
+
         def scan_body(i_idx_carry, j_depth):
             # Get the propositions for the current depth of C_j
             p1_j = conj_j[0, j_depth]
             p2_j = conj_j[1, j_depth]
-            
+
             # Is this depth of C_j active? (i.e., p1_j > 0)
             is_j_active = p1_j > 0
-            
+
             # --- Inner loop: Find a matching i-depth ---
             # We need to find the *first* depth k >= i_idx_carry in C_i
             # such that C_i[k] is active and implies C_j[j_depth].
-            
+
             def find_i_loop_cond(val):
                 # val is (k, found_match)
                 k, found_match = val
                 # Continue looping if we're still within bounds and haven't found a match
-                return (k < max_depth) & ~found_match
-    
+                return (k < self.max_depth) & ~found_match
+
             def find_i_loop_body(val):
                 k, found_match = val
                 p1_i = conj_i[0, k]
                 p2_i = conj_i[1, k]
-                
+
                 # Is this depth of C_i active?
                 is_i_active = p1_i > 0
-                
+
                 # Check for proposition-level implication
-                i_implies_j = _check_proposition_implication(p1_i, p2_i, p1_j, p2_j)
-                
+                i_implies_j = self._check_proposition_implication(p1_i, p2_i, p1_j, p2_j)
+
                 # We have a match if C_i[k] is active AND it implies C_j[j_depth]
                 is_match = is_i_active & i_implies_j
-                
+
                 # Return the next k and whether we found a match
                 return (k + 1, is_match)
-    
+
             # Start the inner-loop search from `i_idx_carry`
             initial_val = (i_idx_carry, jnp.array(False))
-            
+
             # `final_k` will be the (k_of_match + 1) or max_depth
             # `final_found` will be True if a match was found
             final_k, final_found = jax.lax.while_loop(
-                find_i_loop_cond, 
-                find_i_loop_body, 
+                find_i_loop_cond,
+                find_i_loop_body,
                 initial_val
             )
-            
+
             # This j_depth is satisfied if:
             # 1. It was not active in the first place (~is_j_active)
             # 2. It was active, and we found a matching i_depth (final_found)
             j_level_satisfied = ~is_j_active | final_found
-            
+
             # The new carry for the *next* scan iteration is `final_k`.
             # This ensures our subsequence search in C_i only moves forward.
             # The output for this scan step is whether this j_level was satisfied.
             return final_k, j_level_satisfied
-    
+
         # Initial carry: Start searching C_i from depth 0
-        init_carry = 0 
-        j_depths = jnp.arange(max_depth)
-        
+        init_carry = 0
+        j_depths = jnp.arange(self.max_depth)
+
         # Run the scan over all of C_j's depths
         (final_i_idx, all_j_levels_satisfied) = jax.lax.scan(
             scan_body, init_carry, j_depths
         )
-        
+
         # The implication holds only if *all* of C_j's depths were satisfied.
         return jnp.all(all_j_levels_satisfied)
-    
-    
+
+
     # --- Main Simplification Function ---
-    
-    @partial(jax.jit, static_argnames=['max_depth', 'max_conjuncts'])
-    def simplify_conjuncts(formula_matrix, max_depth, max_conjuncts):
+    @partial(jax.jit, static_argnames=['self'])
+    def simplify_conjuncts(self, formula_matrix):
         """
         Simplifies the formula matrix by removing redundant conjuncts.
-        
+
         A conjunct C_j is removed if any *other* active conjunct C_i implies it.
-        
+
         Args:
             formula_matrix (jnp.ndarray): Shape (2, max_depth, max_conjuncts).
-            max_depth (int): Static argument.
-            max_conjuncts (int): Static argument.
-            
+
         Returns:
             jnp.ndarray: A new formula matrix with redundant conjuncts zeroed out.
         """
-        
+
         # --- 1. Vmap the conjunct implication check ---
-        
+
         # We want to run _check_conjunct_implication for all pairs (i, j).
         # We will vmap over the *last* axis (axis=2) of two matrices.
         vmapped_implies = jax.vmap(
-            _check_conjunct_implication, 
-            in_axes=(2, 2, None), # (conj_i, conj_j, max_depth)
+            self._check_conjunct_implication,
+            in_axes=(2, 2), # (conj_i, conj_j)
             out_axes=0
         )
-        
+
         # --- 2. Create all-pairs (i, j) ---
-        
+
         # We need to compare every conjunct with every other conjunct.
-        i_indices = jnp.arange(max_conjuncts)
-        j_indices = jnp.arange(max_conjuncts)
-        
+        i_indices = jnp.arange(self.max_conjuncts)
+        j_indices = jnp.arange(self.max_conjuncts)
+
         # Create all (i, j) pairs
         # i_pairs = [0, 0, ..., 1, 1, ..., N, N, ...]
-        i_pairs = jnp.repeat(i_indices, max_conjuncts)
+        i_pairs = jnp.repeat(i_indices, self.max_conjuncts)
         # j_pairs = [0, 1, ..., N, 0, 1, ..., N, ...]
-        j_pairs = jnp.tile(j_indices, max_conjuncts)
-    
+        j_pairs = jnp.tile(j_indices, self.max_conjuncts)
+
         # Get the data for all pairs.
         # all_conj_i[..., k] will be the i-conjunct for the k-th pair.
         # all_conj_j[..., k] will be the j-conjunct for the k-th pair.
         # Shape of both is (2, max_depth, max_conjuncts * max_conjuncts)
         all_conj_i = formula_matrix[:, :, i_pairs]
         all_conj_j = formula_matrix[:, :, j_pairs]
-    
+
         # --- 3. Run the implication check for all pairs ---
-        
+
         # This is a 1D array of shape (max_conjuncts * max_conjuncts,)
-        implication_flat = vmapped_implies(all_conj_i, all_conj_j, max_depth)
-        
+        implication_flat = vmapped_implies(all_conj_i, all_conj_j)
+
         # Reshape to a 2D matrix: (i, j)
         # implication_matrix[i, j] is True if C_i implies C_j
-        implication_matrix = implication_flat.reshape(max_conjuncts, max_conjuncts)
-        
+        implication_matrix = implication_flat.reshape(self.max_conjuncts, self.max_conjuncts)
+
         # --- 4. Identify conjuncts to remove ---
-        
+
         # A conjunct `j` is active if its p1 at depth 0 is > 0
         is_active = formula_matrix[0, 0, :] > 0
-        
+
         # Broadcast active masks for i and j
         is_i_active = is_active[:, None]  # Shape (max_conjuncts, 1)
         is_j_active = is_active[None, :]  # Shape (1, max_conjuncts)
-    
+
         # A conjunct cannot imply itself for removal purposes
-        i_not_eq_j = ~jnp.eye(max_conjuncts, dtype=bool)
-        
+        i_not_eq_j = ~jnp.eye(self.max_conjuncts, dtype=bool)
+
         # `valid_implication[i, j]` is True if:
         # 1. i != j
         # 2. C_i is active
         # 3. C_j is active
         # 4. C_i implies C_j
         valid_implication = i_not_eq_j & is_i_active & is_j_active & implication_matrix
-        
+
         # We want to remove any conjunct `j` (the "implied") if *any* *other*
         # conjunct `i` (the "implier") implies it.
         # We check for `any` along axis 0 (the `i` axis).
         # This gives a 1D mask, True for each `j` that should be removed.
         to_remove_mask_1d = jnp.any(valid_implication, axis=0) # Shape (max_conjuncts,)
-        
+
         # --- 5. Create the new simplified matrix ---
-        
+
         # We want a "keep" mask, which is the opposite
         keep_mask_1d = ~to_remove_mask_1d
-        
+
         # Broadcast the 1D keep_mask to the 3D matrix shape
         keep_mask_broadcast = keep_mask_1d[None, None, :]
-        
+
         # Zero out the conjuncts that are marked for removal
         simplified_matrix = jnp.where(
             keep_mask_broadcast,
             formula_matrix,
             0
         )
-        
+
         return simplified_matrix
-    
+
     @partial(jax.jit, static_argnames=['self'])
     def progress(self, formula_matrix, propositions_true):
         """
         Progresses the LTL formula matrix based on the propositions that are true.
-    
+
         Args:
             formula_matrix (jnp.ndarray): The formula representation, shape (2, max_depth, max_conjuncts).
             propositions_true (jnp.ndarray): Boolean array of shape (num_propositions).
                                              propositions_true[i] is True if proposition i is true.
                                              propositions_true[0] is always False (padding).
-    
+
         Returns:
             jnp.ndarray: The new formula_matrix after one step of progression.
         """
         padding = jnp.array([False])
         propositions_true = jnp.concatenate([padding, propositions_true])
-        
+
         # Get the propositions at the current depth (depth 0) for all conjuncts
         p1s = formula_matrix[0, 0, :]  # Shape (max_conjuncts,)
         p2s = formula_matrix[1, 0, :]  # Shape (max_conjuncts,)
-    
+
         # Check if the conditions are met
         # propositions_true[0] is False, so if p1s or p2s is 0, this will be False.
         p1s_met = propositions_true[p1s]
         p2s_met = propositions_true[p2s]
-        
+
         # A condition is met if it's active (p1s > 0) and either p1 or p2 is true
         active_mask = p1s > 0
         condition_met_mask = active_mask & (p1s_met | p2s_met) # Shape (max_conjuncts,)
-    
+
         # Create the "progressed" matrix (roll depth dimension up by 1)
         # This simulates F(p & F(...)) -> F(...)
         progressed_matrix = jnp.roll(formula_matrix, shift=-1, axis=1)
         # Zero out the last depth-level after rolling
         progressed_matrix = progressed_matrix.at[:, self.max_depth - 1, :].set(0)
-    
+
         # If the condition was not met, the formula remains the same (retained_matrix)
         retained_matrix = formula_matrix
-    
+
         # Use jnp.where to select between progressed and retained for each conjunct
         # We need to broadcast the 1D mask to the 3D matrix shape
         progress_mask_broadcast = jnp.broadcast_to(
-            condition_met_mask[None, None, :], 
+            condition_met_mask[None, None, :],
             formula_matrix.shape
         )
-    
+
         new_formula_matrix = jnp.where(
             progress_mask_broadcast,
             progressed_matrix,
             retained_matrix
         )
         is_true = jnp.all(new_formula_matrix[0, 0, :] == 0)
-        
+
+        new_formula_matrix=self.simplify_conjuncts(new_formula_matrix)
+
         return new_formula_matrix, is_true, jnp.array(False)
 
 

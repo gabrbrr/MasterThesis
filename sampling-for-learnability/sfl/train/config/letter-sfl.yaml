@@ -8,11 +8,11 @@ defaults:
 "ENTITY": ""
 "PROJECT": "letter"
 "WANDB_MODE" : "online"
-"SAVE_PATH": "checkpoints/new_letter"
+"SAVE_PATH": "checkpoints/sfl"
 
 learning:
-  "NUM_ENVS_FROM_SAMPLED": 64
-  "NUM_ENVS_TO_GENERATE": 64
+  "NUM_ENVS_FROM_SAMPLED": 4 #64
+  "NUM_ENVS_TO_GENERATE": 4 #64
 
 # SAMPLE LEARNABILITY 
 "BATCH_SIZE": 5000
