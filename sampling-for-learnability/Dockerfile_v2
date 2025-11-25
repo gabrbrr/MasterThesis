@@ -1,17 +1,22 @@
 FROM nvcr.io/nvidia/jax:23.10-py3
 
 # Create user
-ARG UID=1058
-ARG MYUSER=fantiand
-RUN useradd -u $UID ${MYUSER}
+ARG UID
+ARG MYUSER
+RUN useradd -u $UID --create-home ${MYUSER}
 USER ${MYUSER}
 
-WORKDIR /raid/home/fantiand/gabriel/MasterThesis/sampling-for-learnability
+# default workdir
+WORKDIR /home/${MYUSER}/
 # RUN chown -R ${MYUSER} /home/${MYUSER}
 COPY --chown=${MYUSER} . .
 
 # install from source if needed + all the requirements
 USER root
+
+# install tmux
+RUN apt-get update && \
+    apt-get install -y tmux
 
 RUN pip install -e .
 
@@ -37,4 +42,4 @@ RUN export TF_FORCE_GPU_ALLOW_GROWTH=true
 
 ENV WANDB_API_KEY="5ec7d61c4826bc3a4ec4059227d66685608968b5"
 ENV WANDB_ENTITY="pamfil-1938844"
-#RUN git config --global --add safe.directory /home/${MYUSER}
+RUN git config --global --add safe.directory /home/${MYUSER}

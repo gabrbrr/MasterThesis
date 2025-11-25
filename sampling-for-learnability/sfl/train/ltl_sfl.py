@@ -19,7 +19,6 @@ import os
 from functools import partial
 import time 
 from PIL import Image
-import wandb
 import matplotlib.pyplot as plt
 from jaxued.wrappers import AutoReplayWrapper
 from sfl.envs.ltl_env.letter_env_wrap import Level, make_level_generator, LTLEnv, make_level_mutator_minimax
@@ -65,6 +64,16 @@ def unbatchify(x: jnp.ndarray, agent_list, num_envs, num_actors):
 
 @hydra.main(version_base=None, config_path="config", config_name="letter-sfl")
 def main(config):
+    # 1. Define a writable root in /tmp
+    import pathlib
+    writable_root = "/tmp/wandb_write"
+    pathlib.Path(writable_root).mkdir(parents=True, exist_ok=True)
+
+   
+    os.environ["WANDB_DATA_DIR"] = os.path.join(writable_root, "data")  
+    os.environ["WANDB_CACHE_DIR"] = os.path.join(writable_root, "cache") 
+    os.environ["WANDB_DIR"] = os.path.join(writable_root, "logs")        
+    import wandb
     
     config = OmegaConf.to_container(config)
     config["NUM_ENVS"] = config["learning"]["NUM_ENVS"]
@@ -758,7 +767,8 @@ def main(config):
         metrics['time_delta'] = curr_time - start_time
         metrics["steps_per_section"] = (t_config["EVAL_FREQ"] * t_config["NUM_STEPS"] * t_config["NUM_ENVS"]) / metrics['time_delta']
         wandb.log(metrics, step=metrics["update_count"])
-        if (eval_step % checkpoint_steps == 0) & (eval_step > 0):    
+       # if (eval_step % checkpoint_steps == 0) & (eval_step > 0):  
+        if True:  
             if config["SAVE_PATH"] is not None:
                 params = runner_state[0].params
                 

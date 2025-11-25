@@ -1,6 +1,4 @@
 
-
-
 import  spot
 import logging
 import random
