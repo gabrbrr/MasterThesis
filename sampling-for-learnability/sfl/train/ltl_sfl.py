@@ -28,6 +28,8 @@ from sfl.envs.ltl_env.renderer import LTLEnvRenderer
 from sfl.train.train_utils import save_params
 from sfl.envs.ltl_env.letter_env import LetterEnv
 import os
+from flax.core import freeze, unfreeze
+import orbax.checkpoint as ocp
 
 class Transition(NamedTuple):
     global_done: jnp.ndarray
@@ -73,20 +75,18 @@ def main(config):
     os.environ["WANDB_DATA_DIR"] = os.path.join(writable_root, "data")  
     os.environ["WANDB_CACHE_DIR"] = os.path.join(writable_root, "cache") 
     os.environ["WANDB_DIR"] = os.path.join(writable_root, "logs")        
-    import wandb
+    
     
     config = OmegaConf.to_container(config)
+
+    run_name_identifier = config.get("RUN_NAME", "default_run") 
+    if config["SAVE_PATH"] is not None:
+        ckpt_manager = CheckpointManager(config["SAVE_PATH"], run_name_identifier)
+
     config["NUM_ENVS"] = config["learning"]["NUM_ENVS"]
     config["EVAL_NUM_ATTEMPTS"] = config["env"]["EVAL_NUM_ATTEMPTS"]
     #config["EVAL_LEVELS"] = config["env"]["EVAL_LEVELS"]
-    run = wandb.init(
-        group=config["GROUP_NAME"],
-        entity=config["ENTITY"],
-        project=config["PROJECT"],
-        tags=["IPPO", "RNN", "DR", f"ts: "],
-        config=config,
-        mode=config["WANDB_MODE"],
-    )
+    
     sampler_args=config["env"]["level_generators"]["SIMPLE_AVOIDANCE"]
     rng = jax.random.PRNGKey(config["SEED"])
     print(config["learning"]["NUM_ENVS_FROM_SAMPLED"],config["learning"]["NUM_ENVS_TO_GENERATE"])
@@ -141,63 +141,31 @@ def main(config):
     init_x = obs
     network_params = network.init(_rng, init_x)
 
-    if config.get("GNN_PATH"):
-            print(f"Loading pretrained GNN from: {config['GNN_PATH']}")
-            
-            # Initialize Orbax Manager pointing to the config path
-            # We use PyTreeCheckpointHandler as per your save snippet
-            gnn_task_path= os.path.abspath(os.path.join(config["GNN_PATH"],sampler_args["sampler"]))
-            ckpt_manager = ocp.CheckpointManager(
-                gnn_task_path, 
-                item_handlers=ocp.PyTreeCheckpointHandler()
-            )
+    # if config.get("GNN_PATH"):
+    #     path=os.path.abspath(os.path.join(config["GNN_PATH"],sampler_args["sampler"]))
+    #     print(f"Loading pretrained GNN from: {path}")
 
+    #     try:
+    #         loaded_data = np.load(os.path.join(path,'gnn_params.npy'), allow_pickle=True)
+
+    #         if loaded_data.ndim == 0:
+    #             pretrained_gnn_params = loaded_data.item()
+    #         else:
+    #             pretrained_gnn_params = loaded_data
+
+    #         params_mutable = unfreeze(network_params)
             
-            # Get the latest step
-            latest_step = ckpt_manager.latest_step()
+    #         params_mutable['params']['gnn'] = pretrained_gnn_params
             
-            if latest_step is not None:
-                # This reads the tree structure (ShapeDtypeStructs) from disk without loading the heavy data.
-                # It will return a dict-based tree since AlgoState isn't available.
-                metadata = ckpt_manager.item_metadata(latest_step)
-        
-                # "Don't try to shard this. Just give me a standard numpy array."
-                def force_numpy(leaf):
-                    return ocp.RestoreArgs(restore_type=np.ndarray)
-                    
-                # Create a tree of args matching the structure of the checkpoint
-                numpy_restore_args = jax.tree_util.tree_map(force_numpy, metadata)
-        
-                # 4. Restore using the args
-                # We pass strict=False to be safe against any non-array mismatch, 
-                # though usually not strictly necessary if metadata is fresh.
-                restored_state = ckpt_manager.restore(
-                    latest_step,
-                    args=ocp.args.PyTreeRestore(
-                        restore_args=numpy_restore_args
-                    )
-                )
-        
-                # 5. Extract Params
-                # Since you don't have the classes, 'restored_state' is now a standard Python Dict.
-                # We navigate it using dictionary keys.
-                try:
-                    # Access dictionary keys instead of class attributes
-                    pretrained_gnn_params = restored_state['algo_state']['params']['gnn']
-                    
-                    # ... (Proceed with your grafting/unfreezing logic) ...
-                    params_mutable = unfreeze(network_params)
-                    params_mutable['params']['gnn'] = pretrained_gnn_params
-                    network_params = freeze(params_mutable)
-                    
-                    print(f"Successfully grafted GNN parameters from step {latest_step}")
-                    
-                except KeyError as e:
-                    print(f"WARNING: Could not find key path in checkpoint: {e}")
-                    print(f"Available top-level keys: {restored_state.keys()}")
-        
-            else:
-                print(f"WARNING: No checkpoints found in {gnn_task_path}")
+    #         network_params = freeze(params_mutable)
+    #         print("Successfully injected GNN parameters.")
+
+    #     except Exception as e:
+    #         print(f"Failed to load GNN parameters: {e}")
+    #         raise e
+
+    # else:
+    #     print("No GNN path provided, initializing from scratch.")
 
     if t_config["ANNEAL_LR"]:
         tx = optax.chain(
@@ -214,6 +182,20 @@ def main(config):
         params=network_params,
         tx=tx,
     )
+    train_state, rng, start_step, resumed_wandb_id = ckpt_manager.restore_or_initialize(train_state, rng)
+
+    import wandb
+    run = wandb.init(
+        id=resumed_wandb_id,      
+        resume="allow",
+        group=config["GROUP_NAME"],
+        entity=config["ENTITY"],
+        project=config["PROJECT"],
+        tags=["IPPO", "RNN", "DR", f"ts: "],
+        config=config,
+        mode=config["WANDB_MODE"],
+    )
+    current_wandb_id = run.id
 
     rng, _rng = jax.random.split(rng)
     # initial_singleton_test_metrics = eval_singleton_runner.run(_rng, train_state.params)  
@@ -659,6 +641,7 @@ def main(config):
                     # "mean_ued_score": metric["mean_ued_score"],
                     **metric["episodic_return_length"],
                     **metric["loss_info"],
+                    **metric["level_stats"]
                     # "mean_lambda_val": metric["mean_lambda_val"],
                 }
             )
@@ -731,7 +714,7 @@ def main(config):
         
         update_steps = update_steps + 1
         runner_state = (train_state, env_state, start_state, obsv,  jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool), update_steps, rng)
-        return (runner_state, instances), metric
+        return (runner_state, instances), None#, metric
     
     def log_buffer(learnability, states, epoch):
         num_samples = states.env_state.env_state.agent.shape[0]
@@ -763,7 +746,7 @@ def main(config):
         # TRAIN
         learnabilty_scores, instances = get_learnability_set(learnability_rng, runner_state[0].params)
         runner_state_instances = (runner_state, instances)
-        runner_state_instances, train_metrics_stack = jax.lax.scan(train_step, runner_state_instances, None, t_config["EVAL_FREQ"])
+        runner_state_instances, _ = jax.lax.scan(train_step, runner_state_instances, None, t_config["EVAL_FREQ"])
         # EVAL
         
         test_metrics = {
@@ -804,23 +787,32 @@ def main(config):
         start_state,
         obsv,
         jnp.zeros((t_config["NUM_ACTORS"]), dtype=bool),
-        0,
+        start_step,
         _rng,
     )
+    total_updates = int(t_config["NUM_UPDATES"] // t_config["EVAL_FREQ"])
+    start_cycle = int(start_step // t_config["EVAL_FREQ"])
+
+    print(f"Starting training from step {start_step} (Cycle {start_cycle}/{total_updates})")
     checkpoint_steps = t_config["NUM_UPDATES"] // t_config["EVAL_FREQ"] // t_config["NUM_CHECKPOINTS"]
-    for eval_step in range(int(t_config["NUM_UPDATES"] // t_config["EVAL_FREQ"])):
+    for eval_step in range(start_cycle, total_updates):
         start_time = time.time()
         rng, eval_rng = jax.random.split(rng)
         runner_state, instances, metrics = train_and_eval_step(runner_state, eval_rng)
         jax.block_until_ready(runner_state)
         curr_time = time.time()
-        current_update = metrics["update_count"]
-        start_update = current_update - t_config["EVAL_FREQ"]
+        #current_update = metrics["update_count"]
+        #start_update = current_update - t_config["EVAL_FREQ"]
         # for i in range(t_config["EVAL_FREQ"]):
-        #     # Get the metric for step `i` from the stack
-        #     step_metric = jax.tree_map(lambda x: x[i], train_metrics_stack)
-        #     # Log it at the correct, individual step number
-        #     wandb.log(step_metric, step=(start_update + i))
+        #     # Helper to extract the i-th slice of the nested dictionary
+        #     def get_step_data(data, idx):
+        #         return jax.tree_map(lambda x: x[idx], data)
+
+        #     step_metrics = get_step_data(train_metrics_stack, i)
+
+            
+            
+        #     wandb.log(step_metrics, step=(start_update + i))
         map_image=log_buffer(*instances, metrics["update_count"])
         metrics["maps"] = map_image
         metrics['time_delta'] = curr_time - start_time
@@ -829,30 +821,42 @@ def main(config):
        # if (eval_step % checkpoint_steps == 0) & (eval_step > 0):  
         if True:  
             if config["SAVE_PATH"] is not None:
-                params = runner_state[0].params
+                # params = runner_state[0].params
                 
-                save_dir = os.path.join(config["SAVE_PATH"], run.name)
-                os.makedirs(save_dir, exist_ok=True)
-                save_params(params, f'{save_dir}/model.safetensors')
-                print(f'Parameters of saved in {save_dir}/model.safetensors')
+                # save_dir = os.path.join(config["SAVE_PATH"], run.name)
+                # os.makedirs(save_dir, exist_ok=True)
+                # save_params(params, f'{save_dir}/model.safetensors')
+                # print(f'Parameters of saved in {save_dir}/model.safetensors')
                 
-                # upload this to wandb as an artifact   
-                artifact = wandb.Artifact(f'{run.name}-checkpoint', type='checkpoint')
-                artifact.add_file(f'{save_dir}/model.safetensors')
-                artifact.save()
+                # # upload this to wandb as an artifact   
+                # artifact = wandb.Artifact(f'{run.name}-checkpoint', type='checkpoint')
+                # artifact.add_file(f'{save_dir}/model.safetensors')
+                # artifact.save()
+                curr_train_state = runner_state[0]
+                curr_step = runner_state[-2]
+                curr_rng = runner_state[-1]
                 
+                # Save with the current ID
+                ckpt_manager.save_checkpoint(curr_train_state, curr_rng, curr_step, current_wandb_id)
+                    
     if config["SAVE_PATH"] is not None:
-        params = runner_state[0].params
+        # params = runner_state[0].params
         
-        save_dir = os.path.join(config["SAVE_PATH"], run.name)
-        os.makedirs(save_dir, exist_ok=True)
-        save_params(params, f'{save_dir}/model.safetensors')
-        print(f'Parameters of saved in {save_dir}/model.safetensors')
+        # save_dir = os.path.join(config["SAVE_PATH"], run.name)
+        # os.makedirs(save_dir, exist_ok=True)
+        # save_params(params, f'{save_dir}/model.safetensors')
+        # print(f'Parameters of saved in {save_dir}/model.safetensors')
         
-        # upload this to wandb as an artifact   
-        artifact = wandb.Artifact(f'{run.name}-checkpoint', type='checkpoint')
-        artifact.add_file(f'{save_dir}/model.safetensors')
-        artifact.save()
+        # # upload this to wandb as an artifact   
+        # artifact = wandb.Artifact(f'{run.name}-checkpoint', type='checkpoint')
+        # artifact.add_file(f'{save_dir}/model.safetensors')
+        # artifact.save()
+        curr_train_state = runner_state[0]
+        curr_step = runner_state[-2]
+        curr_rng = runner_state[-1]
+        
+        # Save with the current ID
+        ckpt_manager.save_checkpoint(curr_train_state, curr_rng, curr_step, current_wandb_id)
     
 
 if __name__ == "__main__":

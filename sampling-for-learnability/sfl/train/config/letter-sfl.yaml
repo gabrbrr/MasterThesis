@@ -11,8 +11,8 @@ defaults:
 "SAVE_PATH": "checkpoints/sfl"
 
 learning:
-  "NUM_ENVS_FROM_SAMPLED": 4 #64
-  "NUM_ENVS_TO_GENERATE": 4 #64
+  "NUM_ENVS_FROM_SAMPLED": 16
+  "NUM_ENVS_TO_GENERATE": 16
 
 # SAMPLE LEARNABILITY 
 "BATCH_SIZE": 5000
@@ -20,6 +20,8 @@ learning:
 "ROLLOUT_STEPS": 2000
 "NUM_TO_SAVE": 1000
 #"EVAL_SAMPLED_SET_PATH": "jax_multirobsim/deploy/data/sampled_test_set_100e_4a.pkl"
+"GNN_PATH": "checkpoints/gnn_checkpoints"
+"RUN_NAME": "stellar-firefly-179"
 
 # defaults:
 #   - env: letter
@@ -43,3 +45,4 @@ learning:
 # "ROLLOUT_STEPS": 200
 # "NUM_TO_SAVE": 100
 # #"EVAL_SAMPLED_SET_PATH": "jax_multirobsim/deploy/data/sampled_test_set_100e_4a.pkl"
+#"GNN_PATH": "checkpoints/gnn_checkpoints"

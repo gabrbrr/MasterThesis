@@ -336,9 +336,8 @@ class RelationalUpdate(nn.Module):
         # Compute messages: messages[e] = W_type(e) * h_sender(e)
         # einsum is efficient for this batched matrix-vector product.
         messages = jnp.einsum('eif,ei->ef', edge_kernels, sender_features) # Shape: [num_edges, out_features]
-      #  bias = self.param('bias', nn.initializers.zeros, (self.features,))
-        return messages 
-        #+ bias
+        bias = self.param('bias', nn.initializers.zeros, (self.features,))
+        return messages + bias
 
 def CustomRelationalGraphConvolution(
     update_node_module: nn.Module,
@@ -810,63 +809,35 @@ def main(config):
         network_params = network.init(rng, obs) 
 
         if config.get("GNN_PATH"):
-            print(f"Loading pretrained GNN from: {config['GNN_PATH']}")
-            
-            # Initialize Orbax Manager pointing to the config path
-            # We use PyTreeCheckpointHandler as per your save snippet
-            gnn_task_path= os.path.abspath(os.path.join(config["GNN_PATH"],sampler_args["sampler"]))
-            ckpt_manager = ocp.CheckpointManager(
-                gnn_task_path, 
-                item_handlers=ocp.PyTreeCheckpointHandler()
-            )
+            path=os.path.abspath(os.path.join(config["GNN_PATH"],sampler_args["sampler"]))
+            print(f"Loading pretrained GNN from: {path}")
 
-            
-            # Get the latest step
-            latest_step = ckpt_manager.latest_step()
-            
-            if latest_step is not None:
-                # 2. Get Metadata FIRST
-                # This reads the tree structure (ShapeDtypeStructs) from disk without loading the heavy data.
-                # It will return a dict-based tree since AlgoState isn't available.
-                metadata = ckpt_manager.item_metadata(latest_step)
-        
-                # "Don't try to shard this. Just give me a standard numpy array."
-                def force_numpy(leaf):
-                    return ocp.RestoreArgs(restore_type=np.ndarray)
-                    
-                # Create a tree of args matching the structure of the checkpoint
-                numpy_restore_args = jax.tree_util.tree_map(force_numpy, metadata)
-        
-                # 4. Restore using the args
-                # We pass strict=False to be safe against any non-array mismatch, 
-                # though usually not strictly necessary if metadata is fresh.
-                restored_state = ckpt_manager.restore(
-                    latest_step,
-                    args=ocp.args.PyTreeRestore(
-                        restore_args=numpy_restore_args
-                    )
-                )
-        
-                # 5. Extract Params
-                # Since you don't have the classes, 'restored_state' is now a standard Python Dict.
-                # We navigate it using dictionary keys.
-                try:
-                    # Access dictionary keys instead of class attributes
-                    pretrained_gnn_params = restored_state['algo_state']['params']['gnn']
-                    
-                    # ... (Proceed with your grafting/unfreezing logic) ...
-                    params_mutable = unfreeze(network_params)
-                    params_mutable['params']['gnn'] = pretrained_gnn_params
-                    network_params = freeze(params_mutable)
-                    
-                    print(f"Successfully grafted GNN parameters from step {latest_step}")
-                    
-                except KeyError as e:
-                    print(f"WARNING: Could not find key path in checkpoint: {e}")
-                    print(f"Available top-level keys: {restored_state.keys()}")
-        
-            else:
-                print(f"WARNING: No checkpoints found in {gnn_task_path}")
+            try:
+                # 1. Load the numpy file
+                # allow_pickle=True is required if the .npy contains a dictionary
+                loaded_data = np.load(os.path.join(path,'gnn_params.npy'), allow_pickle=True)
+
+                # 2. Extract dictionary if wrapped in a 0-d array (common with np.save)
+                if loaded_data.ndim == 0:
+                    pretrained_gnn_params = loaded_data.item()
+                else:
+                    pretrained_gnn_params = loaded_data
+
+                # 3. Inject into the network params
+                params_mutable = unfreeze(network_params)
+                
+                # Verify stricture compatibility if needed, otherwise assign directly
+                params_mutable['params']['gnn'] = pretrained_gnn_params
+                
+                network_params = freeze(params_mutable)
+                print("Successfully injected GNN parameters.")
+
+            except Exception as e:
+                print(f"Failed to load GNN parameters: {e}")
+                raise e
+
+        else:
+            print("No GNN path provided, initializing from scratch.")
 
         
         tx = optax.chain(
