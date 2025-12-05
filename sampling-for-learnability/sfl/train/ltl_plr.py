@@ -1,7 +1,8 @@
 """ 
 JaxUED script (with minor logging modifications) for running PLR, ACCEL and DR on Minigrid Maze.
 """
-
+import os
+#os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 import json
 import time
 from typing import Sequence, Tuple
@@ -14,7 +15,6 @@ import flax.linen as nn
 from flax.linen.initializers import constant, orthogonal
 import optax
 import distrax
-import os
 import orbax.checkpoint as ocp
 
 import wandb
@@ -625,8 +625,16 @@ def compute_score(config, dones, values, max_returns, advantages):
 
 @hydra.main(version_base=None, config_path="config", config_name="letter-plr")
 def main(config):
+   
+    import pathlib
+    writable_root = "/tmp/wandb_write"
+    pathlib.Path(writable_root).mkdir(parents=True, exist_ok=True)
+
+   
+    os.environ["WANDB_DATA_DIR"] = os.path.join(writable_root, "data")  
+    os.environ["WANDB_CACHE_DIR"] = os.path.join(writable_root, "cache") 
+    os.environ["WANDB_DIR"] = os.path.join(writable_root, "logs")
     config = OmegaConf.to_container(config)
-    
     d = {}
     for k, v in config.items():
         if isinstance(v, dict):
@@ -634,7 +642,6 @@ def main(config):
         else:
             d[k] = v
     config = d
-
     sampler_args=config["level_generators"]["SIMPLE_AVOIDANCE"]
 
     config["TOTAL_TIMESTEPS"] = int(config["TOTAL_TIMESTEPS"])

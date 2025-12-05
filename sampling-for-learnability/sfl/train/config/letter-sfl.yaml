@@ -21,7 +21,7 @@ learning:
 "NUM_TO_SAVE": 1000
 #"EVAL_SAMPLED_SET_PATH": "jax_multirobsim/deploy/data/sampled_test_set_100e_4a.pkl"
 "GNN_PATH": "checkpoints/gnn_checkpoints"
-"RUN_NAME": "stellar-firefly-179"
+#"RUN_NAME": "stellar-firefly-179"
 
 # defaults:
 #   - env: letter

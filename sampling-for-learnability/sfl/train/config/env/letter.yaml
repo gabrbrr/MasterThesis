@@ -4,7 +4,7 @@ env:
   max_steps_in_episode: 75
   grid_size: 7
   letters: "aabbccddeeffgghhiijjkkll"
-  use_fixed_map: false
+  use_fixed_map: true
   use_agent_centric_view: true
 
 level_generators:
@@ -16,12 +16,20 @@ level_generators:
       min_conjunctions: 1
       max_conjunctions: 2
 
-  COMPLEX_AVOIDANCE:
+  COMPLEX_AVOIDANCE_DEPTH:
     sampler: "avoidance"
     types:
-      min_levels: 3
+      min_levels: 1
       max_levels: 6
-      min_conjunctions: 2
+      min_conjunctions: 1
+      max_conjunctions: 1
+  
+  COMPLEX_AVOIDANCE_CONJUNCTION:
+    sampler: "avoidance"
+    types:
+      min_levels: 1
+      max_levels: 2
+      min_conjunctions: 1
       max_conjunctions: 3
   
   SIMPLE_PO:
@@ -32,11 +40,19 @@ level_generators:
       min_conjunctions: 1
       max_conjunctions: 4
 
-  COMPLEX_PO:
+  COMPLEX_PO_DEPTH:
     sampler_class: "partially_ordered"
     types:
-      min_levels: 5
+      min_levels: 15
       max_levels: 15
-      min_conjunctions: 4
+      min_conjunctions: 2
+      max_conjunctions: 4
+  
+  COMPLEX_PO_CONJUNCTION:
+    sampler_class: "partially_ordered"
+    types:
+      min_levels: 3
+      max_levels: 5
+      min_conjunctions: 12
       max_conjunctions: 12
       

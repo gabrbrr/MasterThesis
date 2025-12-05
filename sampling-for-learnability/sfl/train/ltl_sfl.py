@@ -28,7 +28,6 @@ from sfl.envs.ltl_env.renderer import LTLEnvRenderer
 from sfl.train.train_utils import save_params
 from sfl.train.train_utils.CheckpointManager import CheckpointManager
 from sfl.envs.ltl_env.letter_env import LetterEnv
-import os
 from flax.core import freeze, unfreeze
 import orbax.checkpoint as ocp
 

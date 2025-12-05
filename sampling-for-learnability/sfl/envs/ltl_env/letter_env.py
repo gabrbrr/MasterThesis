@@ -8,12 +8,6 @@ from flax.struct import PyTreeNode
 import matplotlib.pyplot as plt
 import numpy as np
 import random 
-# --- Mocking dependencies from sfl.envs.ltl_env.utils ---
-# Based on the default letters="aabbccddeeffgghhiijjkkll"
-# This assumes letters 'a' through 'l'.
-# _LETTERS_STR = "abcdefghijklmnopqrstuvwyz"
-# LTL_BASE_VOCAB = {c: i for i, c in enumerate(_LETTERS_STR)}
-# VOCAB_INV = {i: c for i, c in enumerate(_LETTERS_STR)}
 
 class LetterEnvState(PyTreeNode):
     agent: chex.Array
@@ -31,7 +25,7 @@ class LetterEnv():
     def __init__(self,
                  grid_size=7,
                  letters="aabbccddeeffgghhiijjkkll",
-                 use_fixed_map=False,
+                 use_fixed_map=True,
                  use_agent_centric_view=True,
                  max_steps_in_episode=75
                 ):
@@ -51,9 +45,16 @@ class LetterEnv():
         self.locations = jnp.array([(i, j) for i in range(self.grid_size) for j in range(self.grid_size) if (i, j) != (0, 0)])
         self.len_locations=len(self.locations)
         self.len_letters=len(self.letters_arr)
-    @partial(jax.jit, static_argnames=("self"))
-    def reset_env(self, key: chex.Array) -> tuple[chex.Array, LetterEnvState]:
-        """Reset environment, sample valid map, place agent at (0,0)."""
+        self.fixed_key = jax.random.PRNGKey(42)
+        self._generation_logic = jax.jit(self._generate_valid_map)
+
+        if self.use_fixed_map:
+            print("Pre-computing fixed map...")
+            self.cached_fixed_map = self._generation_logic(self.fixed_key)
+        else:
+            self.cached_fixed_map = None
+   
+    def _generate_valid_map(self, key: chex.Array) -> chex.Array:
         def sample_map(rng):
             rng, subkey = jax.random.split(rng)
             perm = jax.random.permutation(subkey, self.len_locations)
@@ -79,11 +80,22 @@ class LetterEnv():
             rng, sub = jax.random.split(rng)
             return try_sample_map(sub)
 
-        init_key = key if self.use_fixed_map else jax.random.split(key)[0]
-        map_array, _, rng = jax.lax.while_loop(cond_fn, body_fn, (empty_map, False, init_key))
+
+        key= jax.random.split(key)[0]
+        map_array, _, rng = jax.lax.while_loop(cond_fn, body_fn, (empty_map, False, key))
+        return map_array
+
+    @partial(jax.jit, static_argnames=("self"))
+    def reset_env(self, key: chex.Array) -> tuple[chex.Array, LetterEnvState]:
+        """Reset environment, sample valid map, place agent at (0,0)."""
+        key, state_key = jax.random.split(key)
+        if self.use_fixed_map:
+            map_array = self.cached_fixed_map
+        else:
+            map_array = self._generate_valid_map(key)
 
         state = LetterEnvState(
-            agent=jnp.array([0, 0]), map=map_array, time=0, num_episodes=0, key=rng
+            agent=jnp.array([0, 0]), map=map_array, time=0, num_episodes=0, key=state_key
         )
         obs = self._get_observation(state)
         return obs, state

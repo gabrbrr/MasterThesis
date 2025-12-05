@@ -164,10 +164,8 @@ class LTLEnv(UnderspecifiedEnv):
 
     def is_terminal(self, state: EnvState, params: EnvParams) -> bool:
         """Check whether state is terminal."""
-        # Check for timeout
         done_steps = state.env_state.time >= params.max_steps_in_episode
         
-        # Check for LTL success/failure (which we set in state.terminal)
         return jnp.logical_or(done_steps, state.terminal)
 
     
